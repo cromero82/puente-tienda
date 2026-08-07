@@ -4,6 +4,5 @@ import lombok.Data;
 
 @Data
 public class AsignarConfirmacionRequest {
-    private Long historialElectronicoId;
     private Long notificacionId;
 }

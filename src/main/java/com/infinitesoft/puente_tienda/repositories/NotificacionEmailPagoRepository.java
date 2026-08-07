@@ -11,4 +11,8 @@ public interface NotificacionEmailPagoRepository extends JpaRepository<Notificac
     Optional<NotificacionEmailPago> findByMessageId(String messageId);
 
     List<NotificacionEmailPago> findByEstadoVistaOrderByRecibidoEnDesc(String estadoVista);
+
+    Optional<NotificacionEmailPago> findFirstByHistorialReciboElectronicoIdOrderByRecibidoEnDesc(Long historialReciboElectronicoId);
+
+    List<NotificacionEmailPago> findByMontoAndEstadoVista(java.math.BigDecimal monto, String estadoVista);
 }

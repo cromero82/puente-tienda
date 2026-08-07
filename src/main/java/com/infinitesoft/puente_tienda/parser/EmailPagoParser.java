@@ -11,7 +11,7 @@ import java.util.regex.Pattern;
 
 /**
  * Extrae campos del cuerpo del correo usando plantilla con placeholders
- * {{MONTO}}, {{NOMBRE_PAGADOR}}, {{REFERENCIA_CUENTA}}.
+ * {{nombrePagador}} / {{NOMBRE_PAGADOR}}, {{monto}}, {{referenciaCuenta}}.
  */
 public final class EmailPagoParser {
 
@@ -26,24 +26,30 @@ public final class EmailPagoParser {
         private Long metodoPagoId;
     }
 
+    private static final Pattern PLACEHOLDER = Pattern.compile(
+            "\\{\\{\\s*(nombrePagador|NOMBRE_PAGADOR|monto|MONTO|referenciaCuenta|REFERENCIA_CUENTA)\\s*\\}\\}");
+
     public static ParsedPago parse(String cuerpo, String plantilla, Long metodoPagoId) {
-        if (cuerpo == null || cuerpo.isBlank() || plantilla == null || plantilla.isBlank()) {
-            return parseHeuristico(cuerpo == null ? "" : normalize(cuerpo), metodoPagoId);
+        if (cuerpo == null || cuerpo.isBlank()) {
+            return null;
         }
         String text = normalize(cuerpo);
+        if (plantilla == null || plantilla.isBlank()) {
+            return parseHeuristico(text, metodoPagoId);
+        }
         String tpl = normalize(plantilla);
 
         StringBuilder regex = new StringBuilder();
-        Pattern ph = Pattern.compile("\\{\\{(MONTO|NOMBRE_PAGADOR|REFERENCIA_CUENTA)\\}\\}");
-        Matcher m = ph.matcher(tpl);
+        Matcher m = PLACEHOLDER.matcher(tpl);
         Map<Integer, String> groupNames = new HashMap<>();
         int groupIdx = 1;
         int last = 0;
         while (m.find()) {
             regex.append(flexibleLiteral(tpl.substring(last, m.start())));
-            String name = m.group(1);
-            groupNames.put(groupIdx, name);
-            switch (name) {
+            String rawName = m.group(1);
+            String canon = canonicalize(rawName);
+            groupNames.put(groupIdx, canon);
+            switch (canon) {
                 case "MONTO":
                     regex.append("([\\d.,]+)");
                     break;
@@ -96,28 +102,40 @@ public final class EmailPagoParser {
                 .build();
     }
 
+    private static String canonicalize(String raw) {
+        String u = raw.toUpperCase();
+        if (u.contains("MONTO")) {
+            return "MONTO";
+        }
+        if (u.contains("REFERENCIA")) {
+            return "REFERENCIA_CUENTA";
+        }
+        return "NOMBRE_PAGADOR";
+    }
+
     private static ParsedPago parseHeuristico(String text, Long metodoPagoId) {
         if (text == null || text.isBlank()) {
             return null;
         }
         Pattern p = Pattern.compile(
-                "(?i)pago\\s+por\\s+\\$?\\s*([\\d.,]+).*?(?:de|from)\\s+([A-ZÁÉÍÓÚÑa-záéíóúñ .'-]{3,80}).*?(?:cuenta|\\*)\\s*\\*?(\\d{4})",
+                "(?i)(?:transferencia|pago)\\s+(?:de\\s+([A-ZÁÉÍÓÚÑa-záéíóúñ .'-]{3,80})\\s+)?por\\s+\\$?\\s*([\\d.,]+).*?(?:cuenta\\s*\\*?|\\*)(\\d{4})",
                 Pattern.DOTALL);
         Matcher m = p.matcher(text);
-        if (!m.find()) {
-            Matcher m2 = Pattern.compile("(?i)\\$?\\s*([\\d]{1,3}(?:[.,]\\d{3})*(?:[.,]\\d{2})?)").matcher(text);
-            if (!m2.find()) {
-                return null;
-            }
+        if (m.find()) {
+            String nombre = m.group(1) != null ? m.group(1).trim() : null;
             return ParsedPago.builder()
-                    .monto(parseMonto(m2.group(1)))
+                    .nombrePagador(nombre)
+                    .monto(parseMonto(m.group(2)))
+                    .referenciaCuenta(m.group(3))
                     .metodoPagoId(metodoPagoId)
                     .build();
         }
+        Matcher m2 = Pattern.compile("(?i)\\$?\\s*([\\d]{1,3}(?:[.,]\\d{3})*(?:[.,]\\d{2})?)").matcher(text);
+        if (!m2.find()) {
+            return null;
+        }
         return ParsedPago.builder()
-                .monto(parseMonto(m.group(1)))
-                .nombrePagador(m.group(2).trim())
-                .referenciaCuenta(m.group(3))
+                .monto(parseMonto(m2.group(1)))
                 .metodoPagoId(metodoPagoId)
                 .build();
     }

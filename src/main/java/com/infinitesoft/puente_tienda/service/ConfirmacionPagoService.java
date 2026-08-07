@@ -93,27 +93,34 @@ public class ConfirmacionPagoService {
             return;
         }
         if (candidatos.size() > 1) {
-            // Ambigüedad: dejar PENDIENTE; FE resolverá con nombre pagador
             log.info("Ambigüedad: {} CREADA con monto {}", candidatos.size(), monto);
-            if (nombrePagador != null) {
-                notif.setNombrePagador(nombrePagador);
-                notificacionRepo.save(notif);
-            }
+            candidatos.forEach(c -> {
+                c.setEstado("AMBIGUA");
+                historialElectronicoRepo.save(c);
+            });
             return;
         }
 
-        HistorialReciboElectronico h = candidatos.get(0);
-        confirmar(h, notif, nombrePagador);
+        confirmar(candidatos.get(0), notif, nombrePagador);
     }
 
     @Transactional
-    public PendienteConfirmacionDto asignar(AsignarConfirmacionRequest req) {
-        HistorialReciboElectronico h = historialElectronicoRepo.findById(req.getHistorialElectronicoId())
+    public PendienteConfirmacionDto asignar(Long historialElectronicoId, Long notificacionId) {
+        HistorialReciboElectronico h = historialElectronicoRepo.findById(historialElectronicoId)
                 .orElseThrow(() -> new IllegalArgumentException("historial electrónico no encontrado"));
-        NotificacionEmailPago n = notificacionRepo.findById(req.getNotificacionId())
+        NotificacionEmailPago n = notificacionRepo.findById(notificacionId)
                 .orElseThrow(() -> new IllegalArgumentException("notificación no encontrada"));
+
+        // Resolver hermanas AMBIGUA del mismo monto → dejarlas CREADA si quedan sin match
+        BigDecimal monto = h.getMontoEsperado();
         confirmar(h, n, n.getNombrePagador());
-        return toDto(h, false, null);
+        historialElectronicoRepo.findByEstadoAndMontoEsperado("AMBIGUA", monto).forEach(other -> {
+            if (!other.getId().equals(h.getId())) {
+                other.setEstado("CREADA");
+                historialElectronicoRepo.save(other);
+            }
+        });
+        return toDto(h, n.getId(), false, null);
     }
 
     private void confirmar(HistorialReciboElectronico h, NotificacionEmailPago n, String nombrePagador) {
@@ -124,7 +131,7 @@ public class ConfirmacionPagoService {
         }
         historialElectronicoRepo.save(h);
 
-        n.setEstadoVista("CONFIRMADA");
+        // estado_vista sigue PENDIENTE hasta que el FE termine el countdown → MOSTRADA
         n.setHistorialReciboElectronicoId(h.getId());
         if (nombrePagador != null) {
             n.setNombrePagador(nombrePagador);
@@ -133,64 +140,75 @@ public class ConfirmacionPagoService {
     }
 
     @Transactional(readOnly = true)
-    public List<PendienteConfirmacionDto> listarParaSesion(Long sesionId) {
+    public List<PendienteConfirmacionDto> listarPendientes(Long sesionId) {
         List<HistorialReciboElectronico> creada =
                 historialElectronicoRepo.findByEstadoAndSesionIdOrderByFechaCreacionAsc("CREADA", sesionId);
+        List<HistorialReciboElectronico> ambigua =
+                historialElectronicoRepo.findByEstadoAndSesionIdOrderByFechaCreacionAsc("AMBIGUA", sesionId);
         List<HistorialReciboElectronico> confirmada =
                 historialElectronicoRepo.findByEstadoAndSesionIdOrderByFechaCreacionAsc("CONFIRMADA", sesionId);
 
         List<PendienteConfirmacionDto> out = new ArrayList<>();
+
         for (HistorialReciboElectronico h : creada) {
-            List<HistorialReciboElectronico> mismos =
-                    historialElectronicoRepo.findByEstadoAndMontoEsperado("CREADA", h.getMontoEsperado());
-            boolean ambiguo = mismos.size() > 1;
-            List<CandidatoAmbiguoDto> cands = null;
-            if (ambiguo) {
-                // Buscar notificación PENDIENTE con mismo monto para sugerir nombre
-                String nombreSugerido = notificacionRepo.findByEstadoVistaOrderByRecibidoEnDesc("PENDIENTE")
-                        .stream()
-                        .filter(n -> n.getMonto() != null && n.getMonto().compareTo(h.getMontoEsperado()) == 0)
-                        .map(NotificacionEmailPago::getNombrePagador)
-                        .findFirst()
-                        .orElse(null);
-                String finalNombre = nombreSugerido;
-                cands = mismos.stream()
-                        .map(x -> CandidatoAmbiguoDto.builder()
-                                .historialElectronicoId(x.getId())
-                                .historialReciboId(x.getHistorialReciboId())
-                                .montoEsperado(x.getMontoEsperado())
-                                .nombrePagadorSugerido(finalNombre)
-                                .build())
-                        .collect(Collectors.toList());
-            }
-            out.add(toDto(h, ambiguo, cands));
+            out.add(toDto(h, null, false, null));
         }
+
+        for (HistorialReciboElectronico h : ambigua) {
+            Long notifId = notificacionRepo.findByMontoAndEstadoVista(h.getMontoEsperado(), "PENDIENTE")
+                    .stream()
+                    .filter(n -> n.getHistorialReciboElectronicoId() == null)
+                    .map(NotificacionEmailPago::getId)
+                    .findFirst()
+                    .orElse(null);
+            String nombreSugerido = notificacionRepo.findByMontoAndEstadoVista(h.getMontoEsperado(), "PENDIENTE")
+                    .stream()
+                    .map(NotificacionEmailPago::getNombrePagador)
+                    .filter(x -> x != null && !x.isBlank())
+                    .findFirst()
+                    .orElse(null);
+            List<HistorialReciboElectronico> mismos =
+                    historialElectronicoRepo.findByEstadoAndMontoEsperado("AMBIGUA", h.getMontoEsperado());
+            String finalNombre = nombreSugerido;
+            List<CandidatoAmbiguoDto> cands = mismos.stream()
+                    .map(x -> CandidatoAmbiguoDto.builder()
+                            .historialElectronicoId(x.getId())
+                            .historialReciboId(x.getHistorialReciboId())
+                            .montoEsperado(x.getMontoEsperado())
+                            .nombrePagadorSugerido(finalNombre)
+                            .build())
+                    .collect(Collectors.toList());
+            out.add(toDto(h, notifId, true, cands));
+        }
+
         for (HistorialReciboElectronico h : confirmada) {
-            out.add(toDto(h, false, null));
+            Optional<NotificacionEmailPago> nOpt =
+                    notificacionRepo.findFirstByHistorialReciboElectronicoIdOrderByRecibidoEnDesc(h.getId());
+            if (nOpt.isPresent() && "MOSTRADA".equals(nOpt.get().getEstadoVista())) {
+                continue; // ya vista en panel
+            }
+            Long notifId = nOpt.map(NotificacionEmailPago::getId).orElse(null);
+            out.add(toDto(h, notifId, false, null));
         }
         return out;
     }
 
     @Transactional
-    public void marcarVista(Long historialElectronicoId) {
-        HistorialReciboElectronico h = historialElectronicoRepo.findById(historialElectronicoId)
-                .orElseThrow(() -> new IllegalArgumentException("no encontrado"));
-        if ("CONFIRMADA".equals(h.getEstado())) {
-            h.setEstado("VISTA");
-            historialElectronicoRepo.save(h);
+    public void marcarConfirmadas(List<Long> historialElectronicoIds) {
+        if (historialElectronicoIds == null) {
+            return;
         }
-        if (h.getId() != null) {
-            notificacionRepo.findByEstadoVistaOrderByRecibidoEnDesc("CONFIRMADA").stream()
-                    .filter(n -> historialElectronicoId.equals(n.getHistorialReciboElectronicoId()))
-                    .forEach(n -> {
-                        n.setEstadoVista("VISTA");
+        for (Long id : historialElectronicoIds) {
+            notificacionRepo.findFirstByHistorialReciboElectronicoIdOrderByRecibidoEnDesc(id)
+                    .ifPresent(n -> {
+                        n.setEstadoVista("MOSTRADA");
                         notificacionRepo.save(n);
                     });
         }
     }
 
-    private PendienteConfirmacionDto toDto(HistorialReciboElectronico h, boolean ambiguo,
-                                           List<CandidatoAmbiguoDto> cands) {
+    private PendienteConfirmacionDto toDto(HistorialReciboElectronico h, Long notificacionId,
+                                           boolean ambiguo, List<CandidatoAmbiguoDto> cands) {
         return PendienteConfirmacionDto.builder()
                 .id(h.getId())
                 .historialReciboId(h.getHistorialReciboId())
@@ -201,6 +219,7 @@ public class ConfirmacionPagoService {
                 .nombrePagador(h.getNombrePagador())
                 .fechaCreacion(h.getFechaCreacion())
                 .fechaConfirmacion(h.getFechaConfirmacion())
+                .notificacionId(notificacionId)
                 .ambiguo(ambiguo)
                 .candidatos(cands)
                 .build();

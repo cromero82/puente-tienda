@@ -19,7 +19,8 @@ public class PendienteConfirmacionDto {
     private String nombrePagador;
     private LocalDateTime fechaCreacion;
     private LocalDateTime fechaConfirmacion;
-    /** Si hay varias CREADA con mismo monto, FE muestra ambigüedad. */
+    /** Notificación asociada (match o ambigüedad). */
+    private Long notificacionId;
     private Boolean ambiguo;
     private List<CandidatoAmbiguoDto> candidatos;
 }

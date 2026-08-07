@@ -1,0 +1,8 @@
+name = "email-inbound-pos"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+workers_dev = false
+account_id = "e5767fad6314cdefea8600977bc6cb11"
+
+[vars]
+INBOUND_URL = "https://cotiza.mayaksoluciones.com/api/email-inbound"
