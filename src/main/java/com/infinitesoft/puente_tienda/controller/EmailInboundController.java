@@ -4,7 +4,9 @@ import com.infinitesoft.puente_tienda.config.WebConfig;
 import com.infinitesoft.puente_tienda.dto.EmailInboundRequest;
 import com.infinitesoft.puente_tienda.entities.NotificacionEmailPago;
 import com.infinitesoft.puente_tienda.service.ConfirmacionPagoService;
+import com.infinitesoft.puente_tienda.util.LogMask;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -14,6 +16,7 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/email-inbound")
 @RequiredArgsConstructor
+@Slf4j
 public class EmailInboundController {
 
     private final ConfirmacionPagoService service;
@@ -24,10 +27,25 @@ public class EmailInboundController {
             @RequestHeader(value = "X-Store-Key", required = false) String storeKey,
             @RequestBody EmailInboundRequest body) {
         if (storeKey == null || !storeKey.equals(webConfig.getStoreKey())) {
+            log.warn("email-inbound rechazado: store-key inválido");
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(Map.of("error", "invalid store key"));
         }
+        log.info(
+                "email-inbound recibido messageId={} from={} to={} subject={} textLen={}",
+                LogMask.messageId(body != null ? body.getMessageId() : null),
+                LogMask.email(body != null ? body.getFrom() : null),
+                LogMask.email(body != null ? body.getTo() : null),
+                LogMask.asunto(body != null ? body.getSubject() : null),
+                body != null && body.getText() != null ? body.getText().length() : 0);
         NotificacionEmailPago saved = service.procesarInbound(body);
+        log.info(
+                "email-inbound ok id={} estadoVista={} monto={} pagador={} ref={}",
+                saved.getId(),
+                saved.getEstadoVista(),
+                saved.getMonto(),
+                LogMask.nombre(saved.getNombrePagador()),
+                LogMask.referenciaCuenta(saved.getReferenciaCuenta()));
         return ResponseEntity.ok(Map.of(
                 "id", saved.getId(),
                 "monto", saved.getMonto() != null ? saved.getMonto() : "",

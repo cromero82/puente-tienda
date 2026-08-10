@@ -25,15 +25,16 @@ export default {
       message.headers.get('Message-ID') ||
       `cf-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
-    const text = extractTextPlain(raw) || raw;
+    const text = extractMimePart(raw, 'text/plain');
+    const html = extractMimePart(raw, 'text/html');
 
     const payload = {
       messageId: String(messageId).trim(),
       from: message.from,
       to: message.to,
       subject,
-      text,
-      html: extractHtml(raw) || undefined
+      text: text || undefined,
+      html: html || undefined
     };
 
     const res = await fetch(inboundUrl, {
@@ -53,31 +54,58 @@ export default {
   }
 };
 
-function extractTextPlain(raw) {
+function extractMimePart(raw, mimeType) {
   if (!raw) return '';
-  const m = raw.match(
-    /Content-Type:\s*text\/plain[\s\S]*?\r?\n\r?\n([\s\S]*?)(?=\r?\n--|\r?\nContent-Type:|$)/i
+  const escaped = mimeType.replace('/', '\\/');
+  const re = new RegExp(
+    `Content-Type:\\s*${escaped}[^\\n]*([\\s\\S]*?)\\r?\\n\\r?\\n([\\s\\S]*?)(?=\\r?\\n--[-=\\w]+|\\r?\\nContent-Type:|$)`,
+    'i'
   );
-  if (m) {
-    return decodeQuotedPrintable(m[1]).trim();
+  const m = raw.match(re);
+  if (!m) return '';
+  const headers = `${m[0].slice(0, m[0].indexOf(m[2]))}${m[1] || ''}`;
+  const body = m[2] || '';
+  const charset = extractCharset(headers) || 'utf-8';
+  if (/Content-Transfer-Encoding:\s*base64/i.test(headers)) {
+    try {
+      const bin = atob(body.replace(/\s+/g, ''));
+      const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      return new TextDecoder(normalizeCharset(charset), { fatal: false }).decode(bytes).trim();
+    } catch (e) {
+      return body.trim();
+    }
   }
-  const parts = raw.split(/\r?\n\r?\n/);
-  if (parts.length > 1 && !/multipart\//i.test(raw.slice(0, 500))) {
-    return decodeQuotedPrintable(parts.slice(1).join('\n\n')).trim();
-  }
-  return '';
+  return decodeQuotedPrintable(body, charset).trim();
 }
 
-function extractHtml(raw) {
-  if (!raw) return '';
-  const m = raw.match(
-    /Content-Type:\s*text\/html[\s\S]*?\r?\n\r?\n([\s\S]*?)(?=\r?\n--|\r?\nContent-Type:|$)/i
-  );
-  return m ? decodeQuotedPrintable(m[1]).trim() : '';
+function extractCharset(s) {
+  const m = String(s || '').match(/charset\s*=\s*"?([^";\s]+)"?/i);
+  return m ? m[1] : null;
 }
 
-function decodeQuotedPrintable(s) {
-  return s
-    .replace(/=\r?\n/g, '')
-    .replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+function normalizeCharset(cs) {
+  const c = (cs || 'utf-8').toLowerCase();
+  if (c === 'utf8' || c === 'utf-8') return 'utf-8';
+  if (c.includes('8859-1') || c === 'latin1' || c === 'iso-8859-1') return 'iso-8859-1';
+  if (c.includes('1252')) return 'windows-1252';
+  return 'utf-8';
+}
+
+/** QP → bytes → charset (UTF-8 por defecto). Evita mojibake Ã© / Â¡. */
+function decodeQuotedPrintable(s, charset) {
+  const withoutSoft = String(s || '').replace(/=\r?\n/g, '');
+  const bytes = [];
+  for (let i = 0; i < withoutSoft.length; i++) {
+    if (withoutSoft[i] === '=' && /^[0-9A-Fa-f]{2}/.test(withoutSoft.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(withoutSoft.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      bytes.push(withoutSoft.charCodeAt(i) & 0xff);
+    }
+  }
+  try {
+    return new TextDecoder(normalizeCharset(charset), { fatal: false }).decode(new Uint8Array(bytes));
+  } catch (e) {
+    return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(bytes));
+  }
 }

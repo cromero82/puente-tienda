@@ -36,6 +36,9 @@ public class HistorialReciboElectronico {
     @Column(name = "nombre_pagador", length = 200)
     private String nombrePagador;
 
+    @Column(name = "nombre_cliente", length = 200)
+    private String nombreCliente;
+
     @Column(name = "fecha_creacion", nullable = false)
     private LocalDateTime fechaCreacion;
 

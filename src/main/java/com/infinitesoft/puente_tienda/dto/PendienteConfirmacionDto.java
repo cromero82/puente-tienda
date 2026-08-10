@@ -17,6 +17,9 @@ public class PendienteConfirmacionDto {
     private BigDecimal montoEsperado;
     private String estado;
     private String nombrePagador;
+    /** Cliente del ticket (historial_recibo), si está identificado. */
+    private String nombreCliente;
+    private String numeroVenta;
     private LocalDateTime fechaCreacion;
     private LocalDateTime fechaConfirmacion;
     /** Notificación asociada (match o ambigüedad). */

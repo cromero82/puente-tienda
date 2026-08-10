@@ -52,6 +52,15 @@ public class NotificacionEmailPago {
     @Column(name = "historial_recibo_electronico_id")
     private Long historialReciboElectronicoId;
 
+    @Column(name = "plantilla_notificacion_id")
+    private Long plantillaNotificacionId;
+
+    @Column(name = "plantilla_nombre", length = 40)
+    private String plantillaNombre;
+
+    @Column(name = "plantilla_icono", length = 120)
+    private String plantillaIcono;
+
     @PrePersist
     void onCreate() {
         if (recibidoEn == null) {
