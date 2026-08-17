@@ -21,6 +21,8 @@ public interface NotificacionEmailPagoRepository extends JpaRepository<Notificac
 
     List<NotificacionEmailPago> findAllByOrderByRecibidoEnDesc();
 
+    List<NotificacionEmailPago> findByPlantillaNotificacionIdOrderByIdAsc(Long plantillaNotificacionId);
+
     @Query("SELECT n FROM NotificacionEmailPago n WHERE "
             + "(:estadoVista IS NULL OR n.estadoVista = :estadoVista) AND "
             + "(:q IS NULL OR :q = '' OR LOWER(COALESCE(n.asunto, '')) LIKE LOWER(CONCAT('%', :q, '%')) "

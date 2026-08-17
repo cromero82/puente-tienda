@@ -9,4 +9,9 @@ public class PlantillaNotificacionRequest {
     private String icono;
     private Boolean activo;
     private Integer orden;
+    /** INGRESO | EGRESO */
+    private String naturaleza;
+    private Integer origenFondosOrigenId;
+    private Integer origenFondosDestinoId;
+    private String origenTipo;
 }

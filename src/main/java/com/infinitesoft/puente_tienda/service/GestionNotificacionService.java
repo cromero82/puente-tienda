@@ -23,6 +23,7 @@ public class GestionNotificacionService {
 
     private final NotificacionEmailPagoRepository notificacionRepo;
     private final PlantillaNotificacionPagoRepository plantillaRepo;
+    private final MovimientoDesdeNotificacionService movimientoDesdeNotificacionService;
 
     @Transactional(readOnly = true)
     public List<NotificacionEmailPago> listar(String estadoVista, String q) {
@@ -76,10 +77,15 @@ public class GestionNotificacionService {
                 .icono(normalizeIcono(req.getIcono()))
                 .activo(req.getActivo() == null || req.getActivo())
                 .orden(req.getOrden() != null ? req.getOrden() : siguienteOrden())
+                .naturaleza(normalizeNaturaleza(req.getNaturaleza()))
+                .origenFondosOrigenId(req.getOrigenFondosOrigenId())
+                .origenFondosDestinoId(req.getOrigenFondosDestinoId())
+                .origenTipo(defaultOrigenTipo(req.getOrigenTipo()))
                 .build();
         PlantillaNotificacionPago saved = plantillaRepo.save(p);
         log.info("BD plantilla_notificacion_pago INSERT id={} nombre={} icono={}",
                 saved.getId(), saved.getNombre(), saved.getIcono());
+        movimientoDesdeNotificacionService.registrarPendientesDePlantilla(saved);
         return saved;
     }
 
@@ -100,10 +106,15 @@ public class GestionNotificacionService {
         if (req.getOrden() != null) {
             p.setOrden(req.getOrden());
         }
+        p.setNaturaleza(normalizeNaturaleza(req.getNaturaleza()));
+        p.setOrigenFondosOrigenId(req.getOrigenFondosOrigenId());
+        p.setOrigenFondosDestinoId(req.getOrigenFondosDestinoId());
+        p.setOrigenTipo(defaultOrigenTipo(req.getOrigenTipo()));
         PlantillaNotificacionPago saved = plantillaRepo.save(p);
         log.info("BD plantilla_notificacion_pago UPDATE id={} nombre={} icono={} cuerpoLen={}",
                 saved.getId(), saved.getNombre(), saved.getIcono(),
                 saved.getCuerpo() != null ? saved.getCuerpo().length() : 0);
+        movimientoDesdeNotificacionService.registrarPendientesDePlantilla(saved);
         return saved;
     }
 
@@ -153,5 +164,23 @@ public class GestionNotificacionService {
             throw new IllegalArgumentException("icono no permitido: " + v);
         }
         return v;
+    }
+
+    private static String normalizeNaturaleza(String naturaleza) {
+        if (naturaleza == null || naturaleza.isBlank()) {
+            return null;
+        }
+        String v = naturaleza.trim().toUpperCase();
+        if (!"INGRESO".equals(v) && !"EGRESO".equals(v)) {
+            throw new IllegalArgumentException("naturaleza debe ser INGRESO o EGRESO");
+        }
+        return v;
+    }
+
+    private static String defaultOrigenTipo(String origenTipo) {
+        if (origenTipo == null || origenTipo.isBlank()) {
+            return "MOVIMIENTO BANCO POR IDENTIFICAR";
+        }
+        return origenTipo.trim();
     }
 }

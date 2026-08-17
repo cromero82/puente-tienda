@@ -93,4 +93,14 @@ class EmailPagoParserTest {
         assertNotNull(qr);
         assertEquals("7980", qr.getReferenciaCuenta());
     }
+
+    @Test
+    void extraeCompraLuloConPlantillaEgreso() {
+        String plantilla = "Realizaste una compra en {{nombrePagador}} por {{monto}}";
+        String cuerpo = "Realizaste una compra en DROGUERIA FARMASTER N por $10,000.00";
+        EmailPagoParser.ParsedPago parsed = EmailPagoParser.parseTemplateOnly(cuerpo, plantilla, 2L);
+        assertNotNull(parsed);
+        assertEquals(new BigDecimal("10000.00"), parsed.getMonto());
+        assertEquals("DROGUERIA FARMASTER N", parsed.getNombrePagador());
+    }
 }

@@ -33,6 +33,7 @@ public class ConfirmacionPagoService {
     private final EstablecimientoRepository establecimientoRepo;
     private final PlantillaNotificacionPagoRepository plantillaRepo;
     private final TicketSinNotificacionRepository ticketSinNotificacionRepo;
+    private final MovimientoDesdeNotificacionService movimientoDesdeNotificacionService;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -99,7 +100,13 @@ public class ConfirmacionPagoService {
                 cuerpoTexto != null ? cuerpoTexto.length() : 0,
                 cuerpoLimpio != null ? cuerpoLimpio.length() : 0);
 
-        if (parsed != null && parsed.getMonto() != null) {
+        PlantillaNotificacionPago plantillaMatch = parsed != null && parsed.getPlantillaId() != null
+                ? plantillaRepo.findById(parsed.getPlantillaId()).orElse(null)
+                : null;
+        boolean plantillaLedger = movimientoDesdeNotificacionService.esPlantillaDeMovimiento(plantillaMatch);
+        if (plantillaLedger) {
+            movimientoDesdeNotificacionService.registrarSiAplica(notif, plantillaMatch);
+        } else if (parsed != null && parsed.getMonto() != null) {
             intentarMatchAutomatico(notif, parsed.getMonto(), parsed.getNombrePagador());
         }
         return notif;

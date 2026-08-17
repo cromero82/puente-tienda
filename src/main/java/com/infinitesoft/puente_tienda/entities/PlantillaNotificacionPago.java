@@ -34,6 +34,20 @@ public class PlantillaNotificacionPago {
     @Builder.Default
     private Integer orden = 0;
 
+    /** INGRESO | EGRESO */
+    @Column(length = 20)
+    private String naturaleza;
+
+    @Column(name = "origen_fondos_origen_id")
+    private Integer origenFondosOrigenId;
+
+    @Column(name = "origen_fondos_destino_id")
+    private Integer origenFondosDestinoId;
+
+    @Column(name = "origen_tipo", nullable = false, length = 80)
+    @Builder.Default
+    private String origenTipo = "MOVIMIENTO BANCO POR IDENTIFICAR";
+
     @Column(name = "creado_en")
     private LocalDateTime creadoEn;
 
@@ -52,6 +66,9 @@ public class PlantillaNotificacionPago {
         }
         if (orden == null) {
             orden = 0;
+        }
+        if (origenTipo == null || origenTipo.isBlank()) {
+            origenTipo = "MOVIMIENTO BANCO POR IDENTIFICAR";
         }
     }
 
