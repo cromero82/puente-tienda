@@ -43,14 +43,17 @@ public class ConfirmacionPagoService {
         if (req.getMessageId() != null && !req.getMessageId().isBlank()) {
             Optional<NotificacionEmailPago> existing = notificacionRepo.findByMessageId(req.getMessageId());
             if (existing.isPresent()) {
-                log.info("Email inbound duplicado messageId={} id={}",
-                        LogMask.messageId(req.getMessageId()), existing.get().getId());
+                log.info("Email inbound duplicado messageId={} id={} extraído: {}",
+                        LogMask.messageId(req.getMessageId()),
+                        existing.get().getId(),
+                        LogMask.textoPlano(existing.get().getCuerpoTexto(), 2000));
                 return existing.get();
             }
         }
 
-        String cuerpoLimpio = EmailPagoParser.toPlainText(
-                firstNonBlank(req.getText(), req.getHtml(), ""));
+        String inboundElegido = elegirCuerpoInbound(req.getText(), req.getHtml());
+        String fuenteCuerpo = fuenteCuerpoInbound(req.getText(), req.getHtml(), inboundElegido);
+        String cuerpoLimpio = EmailPagoParser.toPlainText(inboundElegido);
         Long metodoId = req.getMetodoPagoId();
         if (metodoId == null) {
             metodoId = metodoPagoRepo.findByPlantillaNotificacionPagoIsNotNull().stream()
@@ -88,17 +91,38 @@ public class ConfirmacionPagoService {
                 .plantillaIcono(parsed != null ? parsed.getPlantillaIcono() : null)
                 .build();
         notif = notificacionRepo.save(notif);
+        String via = parsed != null && parsed.getPlantillaId() != null
+                ? "plantilla"
+                : (parsed != null ? "heurística" : "sin-extracción");
         log.info(
-                "BD notificacion_email_pago insert id={} estadoVista={} monto={} pagador={} ref={} metodoPagoId={} plantilla={} textoLen={} limpioLen={}",
+                "email-inbound extracción id={} via={} plantilla={} plantillaId={} fuente={} textLen={} htmlLen={} planoLen={} extraidoLen={} monto={} pagador={} ref={}",
+                notif.getId(),
+                via,
+                notif.getPlantillaNombre() != null ? notif.getPlantillaNombre() : "-",
+                notif.getPlantillaNotificacionId() != null ? notif.getPlantillaNotificacionId() : "-",
+                fuenteCuerpo,
+                req.getText() != null ? req.getText().length() : 0,
+                req.getHtml() != null ? req.getHtml().length() : 0,
+                cuerpoLimpio != null ? cuerpoLimpio.length() : 0,
+                cuerpoTexto != null ? cuerpoTexto.length() : 0,
+                notif.getMonto(),
+                LogMask.nombre(notif.getNombrePagador()),
+                LogMask.referenciaCuenta(notif.getReferenciaCuenta()));
+        log.info("email-inbound cuerpo extraído id={}: {}",
+                notif.getId(), LogMask.textoPlano(cuerpoTexto, 2000));
+        if (parsed == null || parsed.getPlantillaId() == null) {
+            log.info("email-inbound cuerpo plano (sin HTML, preview) id={}: {}",
+                    notif.getId(), LogMask.textoPlano(cuerpoLimpio, 800));
+        }
+        log.info(
+                "BD notificacion_email_pago insert id={} estadoVista={} monto={} pagador={} ref={} metodoPagoId={} plantilla={}",
                 notif.getId(),
                 notif.getEstadoVista(),
                 notif.getMonto(),
                 LogMask.nombre(notif.getNombrePagador()),
                 LogMask.referenciaCuenta(notif.getReferenciaCuenta()),
                 notif.getMetodoPagoId(),
-                notif.getPlantillaNombre(),
-                cuerpoTexto != null ? cuerpoTexto.length() : 0,
-                cuerpoLimpio != null ? cuerpoLimpio.length() : 0);
+                notif.getPlantillaNombre());
 
         PlantillaNotificacionPago plantillaMatch = parsed != null && parsed.getPlantillaId() != null
                 ? plantillaRepo.findById(parsed.getPlantillaId()).orElse(null)
@@ -396,13 +420,14 @@ public class ConfirmacionPagoService {
                 attempt.setPlantillaId(p.getId());
                 attempt.setPlantillaNombre(p.getNombre());
                 attempt.setPlantillaIcono(p.getIcono());
-                log.info("email-inbound match plantilla={} id={}", p.getNombre(), p.getId());
+                log.info("email-inbound match plantilla={} id={} extraído: {}",
+                        p.getNombre(), p.getId(), LogMask.textoPlano(attempt.getFragmento(), 2000));
                 return attempt;
             }
         }
         if (!plantillas.isEmpty()) {
-            log.info("email-inbound sin match de plantilla, usando heurística (plantillas={})",
-                    plantillas.size());
+            log.info("email-inbound sin match de plantilla (activas={}), usando heurística. plano: {}",
+                    plantillas.size(), LogMask.textoPlano(cuerpoLimpio, 800));
         }
         return EmailPagoParser.parse(cuerpoLimpio, null, metodoId);
     }
@@ -414,6 +439,57 @@ public class ConfirmacionPagoService {
             }
         }
         return "";
+    }
+
+    /**
+     * Prefiere el cuerpo más útil para plantillas. Muchos clientes (Outlook/CF)
+     * mandan un {@code text/plain} corto o vacío de sentido y el HTML completo;
+     * si se prioriza text, no matchea «Hiciste un pago a… por $…».
+     */
+    static String elegirCuerpoInbound(String text, String html) {
+        String t = text == null ? "" : text.trim();
+        String h = html == null ? "" : html.trim();
+        if (h.isEmpty()) {
+            return t;
+        }
+        if (t.isEmpty()) {
+            return h;
+        }
+        // Señal de correo de pago/compra en HTML y no en text → HTML
+        String tLower = t.toLowerCase();
+        String hLower = h.toLowerCase();
+        boolean htmlParecePago = hLower.contains("hiciste un pago")
+                || hLower.contains("realizaste una compra")
+                || hLower.contains("recibiste un pago")
+                || hLower.contains("recibiste una transferencia")
+                || hLower.contains("por $");
+        boolean textParecePago = tLower.contains("hiciste un pago")
+                || tLower.contains("realizaste una compra")
+                || tLower.contains("recibiste un pago")
+                || tLower.contains("recibiste una transferencia")
+                || tLower.contains("por $");
+        if (htmlParecePago && !textParecePago) {
+            return h;
+        }
+        if (h.length() >= t.length()) {
+            return h;
+        }
+        return t;
+    }
+
+    static String fuenteCuerpoInbound(String text, String html, String elegido) {
+        if (elegido == null || elegido.isBlank()) {
+            return "vacio";
+        }
+        String t = text == null ? "" : text.trim();
+        String h = html == null ? "" : html.trim();
+        if (!h.isEmpty() && elegido.equals(h)) {
+            return "html";
+        }
+        if (!t.isEmpty() && elegido.equals(t)) {
+            return "text";
+        }
+        return "mixto";
     }
 
     private static String blankToNull(String value) {

@@ -6,6 +6,7 @@ import org.springframework.web.util.HtmlUtils;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -35,7 +36,7 @@ public final class EmailPagoParser {
     }
 
     private static final Pattern PLACEHOLDER = Pattern.compile(
-            "\\{\\{\\s*(nombrePagador|NOMBRE_PAGADOR|monto|MONTO|referenciaCuenta|REFERENCIA_CUENTA|_DATE_|_TIME_)\\s*\\}\\}");
+            "\\{\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*\\}\\}");
 
     private static final Pattern BLOQUE_TRANSFERENCIA = Pattern.compile(
             "(?i)(?:Bancolombia\\s*:\\s*)?.{0,80}?recibiste (?:una transferencia|un pago) de.{10,400}?(?:Dudas al\\s*[\\d.\\s]+\\.?|(?:de una y )?gratis\\.|codigo QR.{0,60})");
@@ -51,16 +52,19 @@ public final class EmailPagoParser {
         return parseHeuristico(toPlainText(cuerpo), metodoPagoId);
     }
 
-    /** Match estricto de una plantilla (sin heurística). Null si no coincide. */
+    /**
+     * La plantilla es un fragmento: basta con que aparezca en cualquier parte del cuerpo
+     * (se ignoran mayúsculas, tildes y espacios repetidos). Null si no coincide.
+     */
     public static ParsedPago parseTemplateOnly(String cuerpo, String plantilla, Long metodoPagoId) {
         if (cuerpo == null || cuerpo.isBlank() || plantilla == null || plantilla.isBlank()) {
             return null;
         }
-        String text = toPlainText(cuerpo);
+        String text = foldForMatch(toPlainText(cuerpo));
         if (text.isBlank()) {
             return null;
         }
-        String tpl = softenTemplate(toPlainText(plantilla));
+        String tpl = foldForMatch(softenTemplate(toPlainText(plantilla)));
 
         StringBuilder regex = new StringBuilder();
         Matcher m = PLACEHOLDER.matcher(tpl);
@@ -73,7 +77,8 @@ public final class EmailPagoParser {
             switch (canon) {
                 case "MONTO":
                     groupNames.put(groupIdx++, canon);
-                    regex.append("(?:\\$\\s*)?([\\d.,]+)");
+                    // Incluye apóstrofe CO ($1'200,000.00) y NBSP
+                    regex.append("(?:\\$\\s*)?([\\d.,'\\u00A0\\u2019\\u00B4]+)");
                     break;
                 case "REFERENCIA_CUENTA":
                     groupNames.put(groupIdx++, canon);
@@ -85,6 +90,7 @@ public final class EmailPagoParser {
                 case "_TIME_":
                     regex.append("(?:\\d{1,2}:\\d{2}(?::\\d{2})?)");
                     break;
+                case "LUGAR_RETIRO":
                 case "NOMBRE_PAGADOR":
                 default:
                     groupNames.put(groupIdx++, canon);
@@ -95,7 +101,9 @@ public final class EmailPagoParser {
         }
         regex.append(flexibleLiteral(tpl.substring(last)));
 
-        Pattern compiled = Pattern.compile(regex.toString(), Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        Pattern compiled = Pattern.compile(
+                regex.toString(),
+                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE | Pattern.DOTALL);
         Matcher match = compiled.matcher(text);
         if (!match.find()) {
             return null;
@@ -110,6 +118,7 @@ public final class EmailPagoParser {
                 case "MONTO":
                     monto = parseMonto(val);
                     break;
+                case "LUGAR_RETIRO":
                 case "NOMBRE_PAGADOR":
                     nombre = val;
                     break;
@@ -233,6 +242,10 @@ public final class EmailPagoParser {
         if (u.contains("REFERENCIA")) {
             return "REFERENCIA_CUENTA";
         }
+        if (u.contains("LUGAR") || u.contains("RETIRO") || u.contains("COMERCIO")
+                || u.contains("ESTABLECIMIENTO")) {
+            return "LUGAR_RETIRO";
+        }
         return "NOMBRE_PAGADOR";
     }
 
@@ -240,21 +253,44 @@ public final class EmailPagoParser {
         if (text == null || text.isBlank()) {
             return null;
         }
+        text = foldForMatch(text);
+        Matcher retiro = Pattern.compile(
+                "(?i)retiraste\\s+(?:\\$\\s*)?([\\d.,'\\u00A0\\u2019\\u00B4]+)\\s+en\\s+(\\S+)\\s+de\\s+tu")
+                .matcher(text);
+        if (retiro.find()) {
+            BigDecimal montoRetiro = parseMonto(retiro.group(1));
+            if (montoRetiro != null) {
+                return ParsedPago.builder()
+                        .nombrePagador(retiro.group(2).trim())
+                        .monto(montoRetiro)
+                        .metodoPagoId(metodoPagoId)
+                        .fragmento(compact(retiro.group(0)))
+                        .build();
+            }
+        }
         Pattern p = Pattern.compile(
-                "(?i)(?:transferencia|pago)\\s+(?:de\\s+([A-ZÁÉÍÓÚÑa-záéíóúñ .'-]{3,80})\\s+)?por\\s+\\$?\\s*([\\d.,]+).*?(?:cuenta\\s*\\*?|\\*)(\\d{4})",
+                "(?i)(?:transferencia|pago|compra)\\s+(?:(?:de|en|a)\\s+([A-ZÁÉÍÓÚÑa-záéíóúñ0-9 .'\\-]{2,80})\\s+)?por\\s+\\$?\\s*([\\d.,'\\u00A0\\u2019\\u00B4]+)",
                 Pattern.DOTALL);
         Matcher m = p.matcher(text);
         if (m.find()) {
             String nombre = m.group(1) != null ? m.group(1).trim() : null;
-            return ParsedPago.builder()
-                    .nombrePagador(nombre)
-                    .monto(parseMonto(m.group(2)))
-                    .referenciaCuenta(m.group(3))
-                    .metodoPagoId(metodoPagoId)
-                    .fragmento(firstNonBlank(extraerBloqueTransferencia(text), compact(m.group(0))))
-                    .build();
+            BigDecimal monto = parseMonto(m.group(2));
+            if (monto != null) {
+                Matcher ref = Pattern.compile("(?:cuenta\\s*\\*?|\\*|débito\\s*|debito\\s*)(\\d{4})", Pattern.CASE_INSENSITIVE)
+                        .matcher(text);
+                String refCuenta = ref.find() ? ref.group(1) : null;
+                return ParsedPago.builder()
+                        .nombrePagador(nombre)
+                        .monto(monto)
+                        .referenciaCuenta(refCuenta)
+                        .metodoPagoId(metodoPagoId)
+                        .fragmento(firstNonBlank(extraerBloqueTransferencia(text), compact(m.group(0))))
+                        .build();
+            }
         }
-        Matcher m2 = Pattern.compile("(?i)\\$?\\s*([\\d]{1,3}(?:[.,]\\d{3})*(?:[.,]\\d{2})?)").matcher(text);
+        Matcher m2 = Pattern.compile(
+                "(?i)\\$?\\s*([\\d]{1,3}(?:['.\\s,]\\d{3})+(?:[.,]\\d{2})?|[\\d]+(?:[.,]\\d{2})?)")
+                .matcher(text);
         if (!m2.find()) {
             return null;
         }
@@ -317,6 +353,19 @@ public final class EmailPagoParser {
         return n;
     }
 
+    /**
+     * Colapsa espacios y quita tildes para que la plantilla funcione como «contiene».
+     */
+    static String foldForMatch(String s) {
+        if (s == null || s.isBlank()) {
+            return "";
+        }
+        String n = Normalizer.normalize(s, Normalizer.Form.NFD);
+        n = n.replaceAll("\\p{M}+", "");
+        n = n.replace('\u00A0', ' ').replace('\u202F', ' ').replace('\u2007', ' ');
+        return n.replaceAll("\\s+", " ").trim();
+    }
+
     private static String compact(String s) {
         if (s == null) {
             return "";
@@ -335,12 +384,29 @@ public final class EmailPagoParser {
         if (raw == null) {
             return null;
         }
-        String s = raw.trim().replace("$", "").replace(" ", "");
+        // Bancos CO a veces usan apóstrofe como miles: $1'200,000.00
+        String s = raw.trim()
+                .replace("$", "")
+                .replace("\u00A0", "")
+                .replace(" ", "")
+                .replace("'", "")
+                .replace("\u2019", "")
+                .replace("\u00B4", "");
+        if (s.isEmpty()) {
+            return null;
+        }
+        // Miles con punto (1.200.000,50) → quitar puntos, coma decimal
         if (s.matches(".*\\.\\d{3}(,\\d+)?$") || s.matches("^\\d{1,3}(\\.\\d{3})+(,\\d+)?$")) {
             s = s.replace(".", "").replace(",", ".");
         } else if (s.contains(",") && !s.contains(".")) {
-            s = s.replace(",", ".");
+            // Solo coma: miles o decimal (1,200 vs 10,50)
+            if (s.matches("^\\d{1,3}(,\\d{3})+$")) {
+                s = s.replace(",", "");
+            } else {
+                s = s.replace(",", ".");
+            }
         } else {
+            // US / mixto tras quitar apóstrofe: 1,200,000.00
             s = s.replace(",", "");
         }
         try {

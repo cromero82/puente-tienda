@@ -48,6 +48,33 @@ public class GestionNotificacionController {
         return n;
     }
 
+    @PutMapping("/api/notificaciones-email/{id}/legalizar")
+    public NotificacionEmailPago legalizar(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> body) {
+        String clasificacion = body != null && body.get("clasificacion") != null
+                ? String.valueOf(body.get("clasificacion"))
+                : null;
+        String observacion = body != null && body.get("observacion") != null
+                ? String.valueOf(body.get("observacion"))
+                : null;
+        Integer destinoOf = null;
+        if (body != null && body.get("origenFondosDestinoId") != null) {
+            Object raw = body.get("origenFondosDestinoId");
+            if (raw instanceof Number) {
+                destinoOf = ((Number) raw).intValue();
+            } else {
+                String s = String.valueOf(raw).trim();
+                if (!s.isEmpty() && !"null".equalsIgnoreCase(s)) {
+                    destinoOf = Integer.parseInt(s);
+                }
+            }
+        }
+        log.info("PUT legalizar notificacion id={} clasificacion={} destinoOf={}",
+                id, clasificacion, destinoOf);
+        return service.legalizar(id, clasificacion, observacion, destinoOf);
+    }
+
     @DeleteMapping("/api/notificaciones-email/{id}")
     public ResponseEntity<?> eliminar(@PathVariable Long id) {
         log.info("DELETE notificacion id={}", id);

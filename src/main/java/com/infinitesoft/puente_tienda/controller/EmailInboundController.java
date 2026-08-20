@@ -32,20 +32,22 @@ public class EmailInboundController {
                     .body(Map.of("error", "invalid store key"));
         }
         log.info(
-                "email-inbound recibido messageId={} from={} to={} subject={} textLen={}",
+                "email-inbound recibido messageId={} from={} to={} subject={} textLen={} htmlLen={}",
                 LogMask.messageId(body != null ? body.getMessageId() : null),
                 LogMask.email(body != null ? body.getFrom() : null),
                 LogMask.email(body != null ? body.getTo() : null),
                 LogMask.asunto(body != null ? body.getSubject() : null),
-                body != null && body.getText() != null ? body.getText().length() : 0);
+                body != null && body.getText() != null ? body.getText().length() : 0,
+                body != null && body.getHtml() != null ? body.getHtml().length() : 0);
         NotificacionEmailPago saved = service.procesarInbound(body);
         log.info(
-                "email-inbound ok id={} estadoVista={} monto={} pagador={} ref={}",
+                "email-inbound ok id={} estadoVista={} monto={} pagador={} ref={} extraído: {}",
                 saved.getId(),
                 saved.getEstadoVista(),
                 saved.getMonto(),
                 LogMask.nombre(saved.getNombrePagador()),
-                LogMask.referenciaCuenta(saved.getReferenciaCuenta()));
+                LogMask.referenciaCuenta(saved.getReferenciaCuenta()),
+                LogMask.textoPlano(saved.getCuerpoTexto(), 2000));
         return ResponseEntity.ok(Map.of(
                 "id", saved.getId(),
                 "monto", saved.getMonto() != null ? saved.getMonto() : "",

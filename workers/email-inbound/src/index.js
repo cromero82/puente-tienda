@@ -27,6 +27,21 @@ export default {
 
     const text = extractMimePart(raw, 'text/plain');
     const html = extractMimePart(raw, 'text/html');
+    const extraido = textoPlanoPreview(text, html);
+
+    console.log(
+      'email-inbound recibido from=' +
+        (message.from || '-') +
+        ' to=' +
+        (message.to || '-') +
+        ' subject=' +
+        subject.slice(0, 80) +
+        ' textLen=' +
+        (text ? text.length : 0) +
+        ' htmlLen=' +
+        (html ? html.length : 0)
+    );
+    console.log('email-inbound texto extraído: ' + extraido);
 
     const payload = {
       messageId: String(messageId).trim(),
@@ -50,9 +65,28 @@ export default {
       const body = await res.text().catch(() => '');
       console.error('inbound failed', res.status, body.slice(0, 300));
       message.setReject(`POS inbound ${res.status}`);
+      return;
     }
+    console.log('email-inbound POST ok status=' + res.status + ' url=' + inboundUrl);
   }
 };
+
+function textoPlanoPreview(text, html) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (t.length >= 20) {
+    return t.slice(0, 2000);
+  }
+  const fromHtml = String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/p>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const out = t || fromHtml || '-';
+  return out.slice(0, 2000);
+}
 
 function extractMimePart(raw, mimeType) {
   if (!raw) return '';

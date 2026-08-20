@@ -103,4 +103,75 @@ class EmailPagoParserTest {
         assertEquals(new BigDecimal("10000.00"), parsed.getMonto());
         assertEquals("DROGUERIA FARMASTER N", parsed.getNombrePagador());
     }
+
+    @Test
+    void extraeMontoConApostrofeMilesColombiano() {
+        String plantilla = "Realizaste una compra en {{nombrePagador}} por {{monto}}";
+        String cuerpo = "Realizaste una compra en BABARIA por $1'200,000.00";
+        EmailPagoParser.ParsedPago parsed = EmailPagoParser.parseTemplateOnly(cuerpo, plantilla, 2L);
+        assertNotNull(parsed);
+        assertEquals(0, new BigDecimal("1200000.00").compareTo(parsed.getMonto()));
+        assertEquals("BABARIA", parsed.getNombrePagador());
+    }
+
+    @Test
+    void extraePlantillaPagosQrLuloSinDecimales() {
+        String plantilla = "Hiciste un pago a {{nombrePagador}} por {{monto}}";
+        String cuerpo = "Hiciste un pago a COLTABACO por $1,100,000 Origen tarjeta débito 6038 Lulo bank "
+                + "321 457 2168 No. comprobante 312377 Operación sin costo Fecha 18 de agosto de 2026 Hora 4:04 p.m.";
+        EmailPagoParser.ParsedPago parsed = EmailPagoParser.parseTemplateOnly(cuerpo, plantilla, 2L);
+        assertNotNull(parsed, "debe matchear plantilla PAGOS QR");
+        assertEquals(0, new BigDecimal("1100000").compareTo(parsed.getMonto()));
+        assertEquals("COLTABACO", parsed.getNombrePagador());
+    }
+
+    @Test
+    void heuristicoPagoAPorMontoSinCuentaBancolombia() {
+        String cuerpo = "Hiciste un pago a COLTABACO por $1,100,000 Origen tarjeta débito 6038";
+        EmailPagoParser.ParsedPago parsed = EmailPagoParser.parse(cuerpo, null, 2L);
+        assertNotNull(parsed);
+        assertEquals(0, new BigDecimal("1100000").compareTo(parsed.getMonto()));
+        assertEquals("COLTABACO", parsed.getNombrePagador());
+    }
+
+    @Test
+    void parseMontoAceptaApostrofeYFormatosComunes() {
+        assertEquals(0, new BigDecimal("1200000.00").compareTo(EmailPagoParser.parseMonto("$1'200,000.00")));
+        assertEquals(0, new BigDecimal("1200000.00").compareTo(EmailPagoParser.parseMonto("1.200.000,00")));
+        assertEquals(0, new BigDecimal("10000.00").compareTo(EmailPagoParser.parseMonto("$10,000.00")));
+        assertEquals(0, new BigDecimal("2000.00").compareTo(EmailPagoParser.parseMonto("2,000.00")));
+        assertEquals(0, new BigDecimal("1100000").compareTo(EmailPagoParser.parseMonto("$1,100,000")));
+    }
+
+    @Test
+    void extraeRetiroCajeroConLugarRetiro() {
+        String plantilla = "Retiraste {{monto}} en {{lugarRetiro}} de tu";
+        String cuerpo = "Bancolombia: Retiraste $1.000.000,00 en MF_PUERNOR3 de tu T.Deb **6512 "
+                + "el 07/08/2026 a las 20:21. Si tienes dudas, llamanos al 6045109095. Estamos cerca";
+        EmailPagoParser.ParsedPago parsed = EmailPagoParser.parseTemplateOnly(cuerpo, plantilla, 2L);
+        assertNotNull(parsed);
+        assertEquals(0, new BigDecimal("1000000.00").compareTo(parsed.getMonto()));
+        assertEquals("MF_PUERNOR3", parsed.getNombrePagador());
+        assertTrue(parsed.getFragmento().toLowerCase().contains("retiraste"));
+        assertTrue(parsed.getFragmento().contains("MF_PUERNOR3"));
+    }
+
+    @Test
+    void plantillaEsFragmentoIgnoraEspaciosTildesYMayusculas() {
+        String plantilla = "retiraste  {{monto}}  en  {{lugarRetiro}}  de tu";
+        String cuerpo = "Bancolombia:  RETIRÁSTE   $1.000.000,00   en   MF_PUERNOR3   de   tú  T.Deb **6512";
+        EmailPagoParser.ParsedPago parsed = EmailPagoParser.parseTemplateOnly(cuerpo, plantilla, 2L);
+        assertNotNull(parsed);
+        assertEquals(0, new BigDecimal("1000000.00").compareTo(parsed.getMonto()));
+        assertEquals("MF_PUERNOR3", parsed.getNombrePagador());
+    }
+
+    @Test
+    void heuristicoRetiroSiNoHayPlantilla() {
+        String cuerpo = "Bancolombia: Retiraste $1.000.000,00 en MF_PUERNOR3 de tu T.Deb **6512";
+        EmailPagoParser.ParsedPago parsed = EmailPagoParser.parse(cuerpo, null, 2L);
+        assertNotNull(parsed);
+        assertEquals(0, new BigDecimal("1000000.00").compareTo(parsed.getMonto()));
+        assertEquals("MF_PUERNOR3", parsed.getNombrePagador());
+    }
 }

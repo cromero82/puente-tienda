@@ -2,6 +2,7 @@ package com.infinitesoft.puente_tienda.service;
 
 import com.infinitesoft.puente_tienda.entities.NotificacionEmailPago;
 import com.infinitesoft.puente_tienda.entities.PlantillaNotificacionPago;
+import com.infinitesoft.puente_tienda.parser.EmailPagoParser;
 import com.infinitesoft.puente_tienda.repositories.NotificacionEmailPagoRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -28,6 +29,8 @@ import java.util.UUID;
 public class MovimientoDesdeNotificacionService {
 
     static final String ORIGEN_TIPO_DEFAULT = "MOVIMIENTO BANCO POR IDENTIFICAR";
+    /** Segundo movimiento: sale de «Para ordenar» (u otra bolsa) hacia el bolsillo destino. */
+    static final String ORIGEN_TIPO_LEGALIZACION = "LEGALIZACION_NOTIFICACION";
 
     private final NotificacionEmailPagoRepository notificacionRepo;
 
@@ -66,6 +69,59 @@ public class MovimientoDesdeNotificacionService {
                     plantilla.getNombre(), plantilla.getId(), creados);
         }
         return creados;
+    }
+
+    /**
+     * Rematch de notificaciones sin plantilla (p.ej. llegaron antes de crear/ajustar la plantilla
+     * o el inbound usó un text/plain pobre). Actualiza campos parseados y contabiliza si aplica.
+     */
+    @Transactional
+    public int vincularYContabilizarSinPlantilla(PlantillaNotificacionPago plantilla) {
+        if (plantilla == null || plantilla.getId() == null || plantilla.getCuerpo() == null) {
+            return 0;
+        }
+        List<NotificacionEmailPago> huérfanas = notificacionRepo.findSinPlantillaNoArchivadas();
+        int vinculadas = 0;
+        int movimientos = 0;
+        for (NotificacionEmailPago n : huérfanas) {
+            String cuerpo = firstNonBlank(n.getCuerpoRaw(), n.getCuerpoTexto());
+            EmailPagoParser.ParsedPago parsed =
+                    EmailPagoParser.parseTemplateOnly(cuerpo, plantilla.getCuerpo(), n.getMetodoPagoId());
+            if (parsed == null || parsed.getMonto() == null) {
+                continue;
+            }
+            n.setPlantillaNotificacionId(plantilla.getId());
+            n.setPlantillaNombre(plantilla.getNombre());
+            n.setPlantillaIcono(plantilla.getIcono());
+            n.setMonto(parsed.getMonto());
+            if (parsed.getNombrePagador() != null && !parsed.getNombrePagador().isBlank()) {
+                n.setNombrePagador(parsed.getNombrePagador());
+            }
+            if (parsed.getReferenciaCuenta() != null) {
+                n.setReferenciaCuenta(parsed.getReferenciaCuenta());
+            }
+            if (parsed.getFragmento() != null && !parsed.getFragmento().isBlank()) {
+                n.setCuerpoTexto(parsed.getFragmento());
+            }
+            notificacionRepo.save(n);
+            vinculadas++;
+            if (registrarSiAplica(n, plantilla)) {
+                movimientos++;
+            }
+        }
+        if (vinculadas > 0) {
+            log.info(
+                    "rematch plantilla={} id={} notifsVinculadas={} movimientosCreados={}",
+                    plantilla.getNombre(), plantilla.getId(), vinculadas, movimientos);
+        }
+        return vinculadas;
+    }
+
+    private static String firstNonBlank(String a, String b) {
+        if (a != null && !a.isBlank()) {
+            return a;
+        }
+        return b != null ? b : "";
     }
 
     /**
@@ -111,19 +167,232 @@ public class MovimientoDesdeNotificacionService {
 
         if (origenId != null && destinoId != null && !origenId.equals(destinoId)) {
             insertarTraslado(origenId, destinoId, valor, fecha, usuarioId, tercero, observacion,
-                    origenTipo, notif.getId());
+                    origenTipo, notif.getId(), null);
             return true;
         }
 
         Integer cuentaId = origenId != null ? origenId : destinoId;
         if ("INGRESO".equals(naturaleza)) {
             insertarSimple(cuentaId, "ENTRADA_MANUAL", valor, valor, fecha, usuarioId, tercero,
-                    observacion, origenTipo, notif.getId());
+                    observacion, origenTipo, notif.getId(), null);
         } else {
             insertarSimple(cuentaId, "SALIDA_EGRESO", valor, valor.negate(), fecha, usuarioId, tercero,
-                    observacion, origenTipo, notif.getId());
+                    observacion, origenTipo, notif.getId(), null);
         }
         return true;
+    }
+
+    /**
+     * Reclasifica el saldo que quedó en la bolsa «por identificar» (p.ej. OF «Para ordenar»)
+     * hacia el bolsillo de responsabilidad (Personal, Nómina, gasto…).
+     *
+     * @return true si se insertó traslado de legalización
+     */
+    @Transactional
+    public boolean legalizarEnLedger(
+            NotificacionEmailPago notif,
+            PlantillaNotificacionPago plantilla,
+            String clasificacion,
+            Integer destinoOfOverride,
+            String observacionExtra
+    ) {
+        if (notif == null || notif.getId() == null || notif.getMonto() == null
+                || notif.getMonto().compareTo(BigDecimal.ZERO) <= 0) {
+            return false;
+        }
+        if (yaExiste(ORIGEN_TIPO_LEGALIZACION, notif.getId())) {
+            log.info("notif {} ya tiene LEGALIZACION_NOTIFICACION — skip ledger", notif.getId());
+            return false;
+        }
+        if (!tieneMovimientoPorIdentificar(notif.getId())) {
+            log.info("notif {} sin movimiento POR IDENTIFICAR — solo clasificación", notif.getId());
+            return false;
+        }
+
+        Integer bolsaId = resolverBolsaPorIdentificar(notif, plantilla);
+        Integer destinoId = destinoOfOverride != null
+                ? destinoOfOverride
+                : resolverDestinoPorClasificacion(clasificacion);
+        if (bolsaId == null) {
+            throw new IllegalArgumentException(
+                    "No se encontró la bolsa «por identificar» (p.ej. Sin Clasificar). "
+                            + "Revise la plantilla o el movimiento de la notificación #" + notif.getId());
+        }
+        if (destinoId == null) {
+            if ("OTRO_LEGALIZADO".equalsIgnoreCase(clasificacion)) {
+                log.info("notif {} OTRO_LEGALIZADO sin destino OF — solo clasificación", notif.getId());
+                return false;
+            }
+            throw new IllegalArgumentException(
+                    "Indique el origen de fondos destino para legalizar como «"
+                            + clasificacion + "» (p.ej. Personal administrador, Bolsillo Nómina, Arriendo).");
+        }
+        if (bolsaId.equals(destinoId)) {
+            throw new IllegalArgumentException(
+                    "El destino de legalización no puede ser la misma bolsa por identificar (OF id="
+                            + bolsaId + ").");
+        }
+
+        Integer motivoId = motivoIdPorClasificacion(clasificacion);
+        String usuarioId = resolverUsuarioSistema();
+        LocalDate fecha = notif.getRecibidoEn() != null
+                ? notif.getRecibidoEn().toLocalDate()
+                : LocalDate.now();
+        String tercero = trunc(notif.getNombrePagador(), 150);
+        String observacion = trunc(
+                "Legalizar #" + notif.getId() + " · " + clasificacion
+                        + (observacionExtra != null && !observacionExtra.isBlank()
+                        ? " · " + observacionExtra.trim() : ""),
+                500);
+
+        insertarTraslado(bolsaId, destinoId, notif.getMonto(), fecha, usuarioId, tercero, observacion,
+                ORIGEN_TIPO_LEGALIZACION, notif.getId(), motivoId, clasificacion);
+        log.info("BD LEGALIZACION notif={} bolsaOf={} destinoOf={} clasificacion={} valor={}",
+                notif.getId(), bolsaId, destinoId, clasificacion, notif.getMonto());
+        return true;
+    }
+
+    private boolean tieneMovimientoPorIdentificar(Long notifId) {
+        Number n = (Number) entityManager.createNativeQuery(
+                        "SELECT COUNT(*) FROM movimiento_origen_fondos "
+                                + "WHERE id_referencia = :idRef "
+                                + "AND origen_tipo = :tipo")
+                .setParameter("idRef", notifId)
+                .setParameter("tipo", ORIGEN_TIPO_DEFAULT)
+                .getSingleResult();
+        return n != null && n.longValue() > 0;
+    }
+
+    /**
+     * Bolsa donde quedó el dinero tras el auto-traslado de plantilla
+     * (destino de EGRESO LULO → «Para ordenar», o cuenta con impacto +).
+     */
+    private Integer resolverBolsaPorIdentificar(
+            NotificacionEmailPago notif,
+            PlantillaNotificacionPago plantilla
+    ) {
+        if (plantilla != null && plantilla.getOrigenFondosDestinoId() != null) {
+            return plantilla.getOrigenFondosDestinoId();
+        }
+        @SuppressWarnings("unchecked")
+        List<Object> rows = entityManager.createNativeQuery(
+                        "SELECT origen_fondos_id FROM movimiento_origen_fondos "
+                                + "WHERE id_referencia = :idRef AND origen_tipo = :tipo "
+                                + "AND impacto > 0 ORDER BY id DESC LIMIT 1")
+                .setParameter("idRef", notif.getId())
+                .setParameter("tipo", ORIGEN_TIPO_DEFAULT)
+                .getResultList();
+        if (!rows.isEmpty() && rows.get(0) != null) {
+            return ((Number) rows.get(0)).intValue();
+        }
+        Integer bolsaSinClasificar = firstNonNull(
+                findOrigenFondosIdByNombre("Sin Clasificar"),
+                findOrigenFondosIdByNombre("Para ordenar"));
+        if (bolsaSinClasificar != null) {
+            return bolsaSinClasificar;
+        }
+        return null;
+    }
+
+    private Integer resolverDestinoPorClasificacion(String clasificacion) {
+        if (clasificacion == null) {
+            return null;
+        }
+        switch (clasificacion.trim().toUpperCase()) {
+            case "CUENTA_PERSONAL":
+                return firstNonNull(
+                        findOrigenFondosIdByNombre("Cuenta del dueño"),
+                        findOrigenFondosIdByNombre("Personal administrador"),
+                        findOrigenFondosIdByNombreLike("%dueño%"),
+                        findOrigenFondosIdByNombreLike("%personal%admin%"));
+            case "ANTICIPO_SALARIO":
+                return firstNonNull(
+                        findOrigenFondosIdByNombre("Bolsillo Nómina"),
+                        findOrigenFondosIdByNombreLike("%nómina%"),
+                        findOrigenFondosIdByNombreLike("%nomina%"));
+            case "VALE_EMPLEADO":
+                return firstNonNull(
+                        findOrigenFondosIdByNombre("Bolsillo Nómina"),
+                        findOrigenFondosIdByNombre("Cuenta del dueño"),
+                        findOrigenFondosIdByNombre("Personal administrador"),
+                        findOrigenFondosIdByNombreLike("%nómina%"),
+                        findOrigenFondosIdByNombreLike("%nomina%"));
+            case "GASTO_NEGOCIO":
+            case "OTRO_LEGALIZADO":
+            default:
+                return null;
+        }
+    }
+
+    private Integer motivoIdPorClasificacion(String clasificacion) {
+        if (clasificacion == null) {
+            return null;
+        }
+        String codigo;
+        switch (clasificacion.trim().toUpperCase()) {
+            case "VALE_EMPLEADO":
+                codigo = "LEGALIZAR_VALE_EMPLEADO";
+                break;
+            case "ANTICIPO_SALARIO":
+                codigo = "LEGALIZAR_ANTICIPO_SALARIO";
+                break;
+            case "CUENTA_PERSONAL":
+                codigo = "LEGALIZAR_CUENTA_PERSONAL";
+                break;
+            case "GASTO_NEGOCIO":
+                codigo = "LEGALIZAR_GASTO_NEGOCIO";
+                break;
+            default:
+                return null;
+        }
+        @SuppressWarnings("unchecked")
+        List<Object> rows = entityManager.createNativeQuery(
+                        "SELECT id FROM motivo_movimiento WHERE codigo = :codigo LIMIT 1")
+                .setParameter("codigo", codigo)
+                .getResultList();
+        if (rows.isEmpty() || rows.get(0) == null) {
+            return null;
+        }
+        return ((Number) rows.get(0)).intValue();
+    }
+
+    private Integer findOrigenFondosIdByNombre(String nombreExacto) {
+        @SuppressWarnings("unchecked")
+        List<Object> rows = entityManager.createNativeQuery(
+                        "SELECT id FROM origen_fondos WHERE LOWER(nombre) = LOWER(:n) "
+                                + "AND COALESCE(activo, TRUE) = TRUE ORDER BY id LIMIT 1")
+                .setParameter("n", nombreExacto)
+                .getResultList();
+        if (rows.isEmpty() || rows.get(0) == null) {
+            return null;
+        }
+        return ((Number) rows.get(0)).intValue();
+    }
+
+    private Integer findOrigenFondosIdByNombreLike(String pattern) {
+        @SuppressWarnings("unchecked")
+        List<Object> rows = entityManager.createNativeQuery(
+                        "SELECT id FROM origen_fondos WHERE LOWER(nombre) LIKE LOWER(:p) "
+                                + "AND COALESCE(activo, TRUE) = TRUE ORDER BY id LIMIT 1")
+                .setParameter("p", pattern)
+                .getResultList();
+        if (rows.isEmpty() || rows.get(0) == null) {
+            return null;
+        }
+        return ((Number) rows.get(0)).intValue();
+    }
+
+    @SafeVarargs
+    private static Integer firstNonNull(Integer... values) {
+        if (values == null) {
+            return null;
+        }
+        for (Integer v : values) {
+            if (v != null) {
+                return v;
+            }
+        }
+        return null;
     }
 
     private void insertarTraslado(
@@ -135,15 +404,33 @@ public class MovimientoDesdeNotificacionService {
             String tercero,
             String observacion,
             String origenTipo,
-            Long notifId
+            Long notifId,
+            Integer motivoId
+    ) {
+        insertarTraslado(origenId, destinoId, valor, fecha, usuarioId, tercero, observacion,
+                origenTipo, notifId, motivoId, null);
+    }
+
+    private void insertarTraslado(
+            Integer origenId,
+            Integer destinoId,
+            BigDecimal valor,
+            LocalDate fecha,
+            String usuarioId,
+            String tercero,
+            String observacion,
+            String origenTipo,
+            Long notifId,
+            Integer motivoId,
+            String clasificacionOperativa
     ) {
         String grupoId = UUID.randomUUID().toString();
         insertarFila(origenId, destinoId, "TRASLADO", valor, valor.negate(), fecha, usuarioId,
-                tercero, observacion, origenTipo, notifId, grupoId);
+                tercero, observacion, origenTipo, notifId, grupoId, motivoId, clasificacionOperativa);
         insertarFila(destinoId, null, "TRASLADO", valor, valor, fecha, usuarioId,
-                tercero, observacion, origenTipo, notifId, grupoId);
-        log.info("BD movimiento TRASLADO notif={} origenOf={} destinoOf={} valor={}",
-                notifId, origenId, destinoId, valor);
+                tercero, observacion, origenTipo, notifId, grupoId, motivoId, clasificacionOperativa);
+        log.info("BD movimiento TRASLADO notif={} origenOf={} destinoOf={} valor={} origenTipo={} clasificacion={}",
+                notifId, origenId, destinoId, valor, origenTipo, clasificacionOperativa);
     }
 
     private void insertarSimple(
@@ -156,10 +443,11 @@ public class MovimientoDesdeNotificacionService {
             String tercero,
             String observacion,
             String origenTipo,
-            Long notifId
+            Long notifId,
+            Integer motivoId
     ) {
         insertarFila(cuentaId, null, tipo, valor, impacto, fecha, usuarioId, tercero, observacion,
-                origenTipo, notifId, null);
+                origenTipo, notifId, null, motivoId, null);
         log.info("BD movimiento {} notif={} of={} valor={}", tipo, notifId, cuentaId, valor);
     }
 
@@ -175,7 +463,9 @@ public class MovimientoDesdeNotificacionService {
             String observacion,
             String origenTipo,
             Long notifId,
-            String grupoId
+            String grupoId,
+            Integer motivoId,
+            String clasificacionOperativa
     ) {
         if (!cuentaExiste(cuentaId)) {
             throw new IllegalArgumentException("origen de fondos no existe: " + cuentaId);
@@ -188,11 +478,12 @@ public class MovimientoDesdeNotificacionService {
                         "INSERT INTO movimiento_origen_fondos ("
                                 + "fecha, usuario_id, origen_fondos_id, origen_destino_id, tipo_movimiento, "
                                 + "valor, impacto, saldo_antes, saldo_despues, metodo_pago_id, tercero_nombre, "
-                                + "observacion, origen_tipo, id_referencia, grupo_traslado_id"
+                                + "motivo_movimiento_id, observacion, origen_tipo, id_referencia, grupo_traslado_id, "
+                                + "clasificacion_operativa"
                                 + ") VALUES ("
                                 + ":fecha, :usuarioId, :cuentaId, :destinoId, :tipo, "
                                 + ":valor, :impacto, :saldoAntes, :saldoDespues, :metodoPagoId, :tercero, "
-                                + ":observacion, :origenTipo, :idRef, :grupoId)")
+                                + ":motivoId, :observacion, :origenTipo, :idRef, :grupoId, :clasificacion)")
                 .unwrap(NativeQuery.class);
         q.setParameter("fecha", Date.valueOf(fecha), StandardBasicTypes.DATE);
         q.setParameter("usuarioId", usuarioId, StandardBasicTypes.STRING);
@@ -205,10 +496,12 @@ public class MovimientoDesdeNotificacionService {
         q.setParameter("saldoDespues", saldoDespues, StandardBasicTypes.BIG_DECIMAL);
         q.setParameter("metodoPagoId", metodoPagoId, StandardBasicTypes.LONG);
         q.setParameter("tercero", tercero, StandardBasicTypes.STRING);
+        q.setParameter("motivoId", motivoId, StandardBasicTypes.INTEGER);
         q.setParameter("observacion", observacion, StandardBasicTypes.STRING);
         q.setParameter("origenTipo", origenTipo, StandardBasicTypes.STRING);
         q.setParameter("idRef", notifId, StandardBasicTypes.LONG);
         q.setParameter("grupoId", grupoId, StandardBasicTypes.STRING);
+        q.setParameter("clasificacion", clasificacionOperativa, StandardBasicTypes.STRING);
         q.executeUpdate();
     }
 

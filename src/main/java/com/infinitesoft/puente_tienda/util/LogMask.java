@@ -73,6 +73,38 @@ public final class LogMask {
         return s.substring(0, 48) + "…";
     }
 
+    /**
+     * Cuerpo de correo para logs: sin HTML, una línea, recortado si es muy largo.
+     */
+    public static String textoPlano(String raw) {
+        return textoPlano(raw, 1500);
+    }
+
+    public static String textoPlano(String raw, int maxChars) {
+        if (raw == null || raw.isBlank()) {
+            return "-";
+        }
+        int cap = maxChars < 80 ? 80 : maxChars;
+        String s = raw.replaceAll("(?is)<script[^>]*>.*?</script>", " ")
+                .replaceAll("(?is)<style[^>]*>.*?</style>", " ")
+                .replaceAll("(?i)<br\\s*/?>", " ")
+                .replaceAll("(?i)</p>", " ")
+                .replaceAll("(?i)</div>", " ")
+                .replaceAll("<[^>]+>", " ")
+                .replace('\r', ' ')
+                .replace('\n', ' ')
+                .replace('\t', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (s.isEmpty()) {
+            return "-";
+        }
+        if (s.length() <= cap) {
+            return s;
+        }
+        return s.substring(0, cap) + "… [+" + (s.length() - cap) + " chars]";
+    }
+
     private static String maskToken(String token) {
         if (token == null || token.isEmpty()) {
             return "";

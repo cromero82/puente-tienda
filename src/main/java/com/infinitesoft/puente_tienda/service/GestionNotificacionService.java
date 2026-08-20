@@ -27,10 +27,13 @@ public class GestionNotificacionService {
 
     @Transactional(readOnly = true)
     public List<NotificacionEmailPago> listar(String estadoVista, String q) {
+        String query = q == null ? null : q.trim();
+        if (estadoVista != null && "POR_IDENTIFICAR".equalsIgnoreCase(estadoVista.trim())) {
+            return notificacionRepo.searchPorIdentificar(query);
+        }
         String estado = (estadoVista == null || estadoVista.isBlank() || "TODAS".equalsIgnoreCase(estadoVista))
                 ? null
                 : estadoVista.trim().toUpperCase();
-        String query = q == null ? null : q.trim();
         return notificacionRepo.search(estado, query);
     }
 
@@ -44,6 +47,55 @@ public class GestionNotificacionService {
                 saved.getId(),
                 LogMask.nombre(saved.getNombrePagador()),
                 LogMask.referenciaCuenta(saved.getReferenciaCuenta()));
+        return saved;
+    }
+
+    /**
+     * Legaliza un movimiento bancario por identificar (vale, anticipo, personal, gasto).
+     * Si la notificación ya generó ledger en la bolsa (p.ej. «Para ordenar»),
+     * crea un TRASLADO {@code LEGALIZACION_NOTIFICACION} hacia el OF destino.
+     * Archivar no borra esa responsabilidad.
+     */
+    @Transactional
+    public NotificacionEmailPago legalizar(
+            Long id,
+            String clasificacion,
+            String observacion,
+            Integer origenFondosDestinoId
+    ) {
+        NotificacionEmailPago n = notificacionRepo.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("notificación no encontrada"));
+        String c = clasificacion == null ? "" : clasificacion.trim().toUpperCase();
+        switch (c) {
+            case "VALE_EMPLEADO":
+            case "ANTICIPO_SALARIO":
+            case "CUENTA_PERSONAL":
+            case "GASTO_NEGOCIO":
+            case "OTRO_LEGALIZADO":
+                break;
+            default:
+                throw new IllegalArgumentException(
+                        "clasificación inválida: " + clasificacion
+                                + " (use VALE_EMPLEADO|ANTICIPO_SALARIO|CUENTA_PERSONAL|GASTO_NEGOCIO|OTRO_LEGALIZADO)");
+        }
+
+        PlantillaNotificacionPago plantilla = null;
+        if (n.getPlantillaNotificacionId() != null) {
+            plantilla = plantillaRepo.findById(n.getPlantillaNotificacionId()).orElse(null);
+        }
+
+        boolean movio = movimientoDesdeNotificacionService.legalizarEnLedger(
+                n, plantilla, c, origenFondosDestinoId, observacion);
+
+        n.setClasificacion(c);
+        n.setClasificacionObservacion(observacion);
+        n.setClasificadoEn(java.time.LocalDateTime.now());
+        if (!"ARCHIVADA".equalsIgnoreCase(n.getEstadoVista())) {
+            n.setEstadoVista("MOSTRADA");
+        }
+        NotificacionEmailPago saved = notificacionRepo.save(n);
+        log.info("BD notificacion_email_pago LEGALIZADA id={} clasificacion={} ledgerMovido={}",
+                saved.getId(), saved.getClasificacion(), movio);
         return saved;
     }
 
@@ -86,6 +138,7 @@ public class GestionNotificacionService {
         log.info("BD plantilla_notificacion_pago INSERT id={} nombre={} icono={}",
                 saved.getId(), saved.getNombre(), saved.getIcono());
         movimientoDesdeNotificacionService.registrarPendientesDePlantilla(saved);
+        movimientoDesdeNotificacionService.vincularYContabilizarSinPlantilla(saved);
         return saved;
     }
 
@@ -115,6 +168,7 @@ public class GestionNotificacionService {
                 saved.getId(), saved.getNombre(), saved.getIcono(),
                 saved.getCuerpo() != null ? saved.getCuerpo().length() : 0);
         movimientoDesdeNotificacionService.registrarPendientesDePlantilla(saved);
+        movimientoDesdeNotificacionService.vincularYContabilizarSinPlantilla(saved);
         return saved;
     }
 

@@ -61,6 +61,19 @@ public class NotificacionEmailPago {
     @Column(name = "plantilla_icono", length = 120)
     private String plantillaIcono;
 
+    /** PENDIENTE | VALE_EMPLEADO | ANTICIPO_SALARIO | CUENTA_PERSONAL | GASTO_NEGOCIO | OTRO_LEGALIZADO */
+    @Column(length = 40)
+    private String clasificacion;
+
+    @Column(name = "clasificacion_observacion", columnDefinition = "TEXT")
+    private String clasificacionObservacion;
+
+    @Column(name = "clasificado_en")
+    private LocalDateTime clasificadoEn;
+
+    @Column(name = "clasificado_por")
+    private java.util.UUID clasificadoPor;
+
     @PrePersist
     void onCreate() {
         if (recibidoEn == null) {

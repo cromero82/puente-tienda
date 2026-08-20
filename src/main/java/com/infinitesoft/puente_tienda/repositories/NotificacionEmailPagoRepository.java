@@ -23,6 +23,13 @@ public interface NotificacionEmailPagoRepository extends JpaRepository<Notificac
 
     List<NotificacionEmailPago> findByPlantillaNotificacionIdOrderByIdAsc(Long plantillaNotificacionId);
 
+    /** Notificaciones aún sin plantilla (candidatas a rematch al guardar plantilla). */
+    @Query("SELECT n FROM NotificacionEmailPago n WHERE "
+            + "n.plantillaNotificacionId IS NULL "
+            + "AND UPPER(COALESCE(n.estadoVista, '')) <> 'ARCHIVADA' "
+            + "ORDER BY n.id ASC")
+    List<NotificacionEmailPago> findSinPlantillaNoArchivadas();
+
     @Query("SELECT n FROM NotificacionEmailPago n WHERE "
             + "(:estadoVista IS NULL OR n.estadoVista = :estadoVista) AND "
             + "(:q IS NULL OR :q = '' OR LOWER(COALESCE(n.asunto, '')) LIKE LOWER(CONCAT('%', :q, '%')) "
@@ -32,4 +39,13 @@ public interface NotificacionEmailPagoRepository extends JpaRepository<Notificac
     List<NotificacionEmailPago> search(
             @Param("estadoVista") String estadoVista,
             @Param("q") String q);
+
+    /** Cola: sin clasificar y no archivadas (pendientes de legalizar desde «Para ordenar»). */
+    @Query("SELECT n FROM NotificacionEmailPago n WHERE "
+            + "n.clasificacion IS NULL AND UPPER(n.estadoVista) <> 'ARCHIVADA' AND "
+            + "(:q IS NULL OR :q = '' OR LOWER(COALESCE(n.asunto, '')) LIKE LOWER(CONCAT('%', :q, '%')) "
+            + " OR LOWER(COALESCE(n.cuerpoTexto, '')) LIKE LOWER(CONCAT('%', :q, '%')) "
+            + " OR LOWER(COALESCE(n.nombrePagador, '')) LIKE LOWER(CONCAT('%', :q, '%'))) "
+            + "ORDER BY n.recibidoEn DESC")
+    List<NotificacionEmailPago> searchPorIdentificar(@Param("q") String q);
 }
