@@ -1,12 +1,15 @@
 /**
  * Cloudflare Email Worker: Email Routing → POST /api/email-inbound (POS).
  * Regla: pagos@mayaksoluciones.com → este Worker.
+ *
+ * Fan-out: entrega a DEV (cotiza) y, si está configurado, a SANDBOX (pos-sandbox).
+ * Si al menos un destino responde OK, el correo se acepta.
  */
 export default {
   async email(message, env, ctx) {
-    const inboundUrl = env.INBOUND_URL;
     const storeKey = env.STORE_KEY;
-    if (!inboundUrl || !storeKey) {
+    const urls = collectInboundUrls(env);
+    if (!storeKey || urls.length === 0) {
       message.setReject('Worker mal configurado (INBOUND_URL / STORE_KEY)');
       return;
     }
@@ -39,7 +42,9 @@ export default {
         ' textLen=' +
         (text ? text.length : 0) +
         ' htmlLen=' +
-        (html ? html.length : 0)
+        (html ? html.length : 0) +
+        ' destinos=' +
+        urls.length
     );
     console.log('email-inbound texto extraído: ' + extraido);
 
@@ -52,6 +57,48 @@ export default {
       html: html || undefined
     };
 
+    const results = await Promise.all(
+      urls.map((url) => postInbound(url, storeKey, payload))
+    );
+
+    const okAny = results.some((r) => r.ok);
+    for (const r of results) {
+      if (r.ok) {
+        console.log('email-inbound POST ok status=' + r.status + ' url=' + r.url);
+      } else {
+        console.error(
+          'email-inbound POST fail status=' +
+            r.status +
+            ' url=' +
+            r.url +
+            ' body=' +
+            r.body.slice(0, 300)
+        );
+      }
+    }
+
+    if (!okAny) {
+      const detail = results.map((r) => r.status).join(',');
+      message.setReject(`POS inbound falló en todos (${detail})`);
+    }
+  }
+};
+
+/** URLs únicas: INBOUND_URL (+ INBOUND_URL_SANDBOX si existe). */
+function collectInboundUrls(env) {
+  const seen = new Set();
+  const out = [];
+  for (const key of ['INBOUND_URL', 'INBOUND_URL_SANDBOX']) {
+    const u = String(env[key] || '').trim();
+    if (!u || seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
+}
+
+async function postInbound(inboundUrl, storeKey, payload) {
+  try {
     const res = await fetch(inboundUrl, {
       method: 'POST',
       headers: {
@@ -60,16 +107,17 @@ export default {
       },
       body: JSON.stringify(payload)
     });
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      console.error('inbound failed', res.status, body.slice(0, 300));
-      message.setReject(`POS inbound ${res.status}`);
-      return;
-    }
-    console.log('email-inbound POST ok status=' + res.status + ' url=' + inboundUrl);
+    const body = res.ok ? '' : await res.text().catch(() => '');
+    return { url: inboundUrl, ok: res.ok, status: res.status, body };
+  } catch (e) {
+    return {
+      url: inboundUrl,
+      ok: false,
+      status: 0,
+      body: String(e && e.message ? e.message : e)
+    };
   }
-};
+}
 
 function textoPlanoPreview(text, html) {
   const t = String(text || '').replace(/\s+/g, ' ').trim();

@@ -5,4 +5,7 @@ workers_dev = false
 account_id = "e5767fad6314cdefea8600977bc6cb11"
 
 [vars]
+# Dev (cotiza → Caddy :8080 → puente :8095)
 INBOUND_URL = "https://cotiza.mayaksoluciones.com/api/email-inbound"
+# Sandbox (pos-sandbox → Caddy :8180 → puente :8195)
+INBOUND_URL_SANDBOX = "https://pos-sandbox.mayaksoluciones.com/api/email-inbound"
