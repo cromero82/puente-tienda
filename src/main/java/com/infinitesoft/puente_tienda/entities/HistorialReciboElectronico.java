@@ -18,8 +18,13 @@ public class HistorialReciboElectronico {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "historial_recibo_id", nullable = false)
+    /** Venta QR; null si el origen es un abono CxC. */
+    @Column(name = "historial_recibo_id")
     private Long historialReciboId;
+
+    /** Abono CxC QR; null si el origen es una venta. */
+    @Column(name = "abono_cxc_id")
+    private Long abonoCxcId;
 
     @Column(name = "sesion_id")
     private Long sesionId;
@@ -29,6 +34,9 @@ public class HistorialReciboElectronico {
 
     @Column(name = "monto_esperado", nullable = false, precision = 12, scale = 2)
     private BigDecimal montoEsperado;
+
+    @Column(name = "monto_recibido", precision = 12, scale = 2)
+    private BigDecimal montoRecibido;
 
     @Column(nullable = false, length = 20)
     private String estado;

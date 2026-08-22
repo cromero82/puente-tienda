@@ -31,8 +31,11 @@ public class MovimientoDesdeNotificacionService {
     static final String ORIGEN_TIPO_DEFAULT = "MOVIMIENTO BANCO POR IDENTIFICAR";
     /** Segundo movimiento: sale de «Para ordenar» (u otra bolsa) hacia el bolsillo destino. */
     static final String ORIGEN_TIPO_LEGALIZACION = "LEGALIZACION_NOTIFICACION";
+    /** Ajuste al confirmar QR con monto email ≠ esperado (neto = esperado ya contabilizado). */
+    static final String ORIGEN_TIPO_QR_MONTO_DISTINTO = "QR_MONTO_DISTINTO";
 
     private final NotificacionEmailPagoRepository notificacionRepo;
+    private final FaltanteQrCreditoService faltanteQrCreditoService;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -250,6 +253,168 @@ public class MovimientoDesdeNotificacionService {
         log.info("BD LEGALIZACION notif={} bolsaOf={} destinoOf={} clasificacion={} valor={}",
                 notif.getId(), bolsaId, destinoId, clasificacion, notif.getMonto());
         return true;
+    }
+
+    /**
+     * Tras confirmar match QR con monto distinto al esperado.
+     * <ul>
+     *   <li>Sobrepago: +diff en OF del medio QR; −diff en {@code origenFondosDevolucionId}
+     *       (caja u otro OF elegido — el efectivo que se le devolvió al cliente).</li>
+     *   <li>Faltante: −diff en OF del medio QR (no llegó al banco) y deuda CxC
+     *       (crear o reabrir saldo) por el faltante.</li>
+     * </ul>
+     */
+    @Transactional
+    /**
+     * @return reapertura de ticket para CxC manual (venta faltante); null en sobrepago / abono CxC
+     */
+    public com.infinitesoft.puente_tienda.dto.FaltanteReaperturaResult registrarAjusteMontoDistintoQr(
+            Long metodoPagoId,
+            BigDecimal montoEsperado,
+            BigDecimal montoRecibido,
+            Long historialElectronicoId,
+            String tercero,
+            Integer origenFondosDevolucionId,
+            Long historialReciboId,
+            Long abonoCxcId
+    ) {
+        if (historialElectronicoId == null || montoEsperado == null || montoRecibido == null) {
+            return null;
+        }
+        BigDecimal diff = montoRecibido.subtract(montoEsperado);
+        if (diff.compareTo(BigDecimal.ZERO) == 0) {
+            return null;
+        }
+        if (yaExiste(ORIGEN_TIPO_QR_MONTO_DISTINTO, historialElectronicoId)) {
+            log.info("hre {} ya tiene ajuste QR_MONTO_DISTINTO — skip", historialElectronicoId);
+            return null;
+        }
+        Integer cuentaQrId = findOrigenFondosIdByMetodoPago(metodoPagoId);
+        if (cuentaQrId == null) {
+            log.warn("hre {} sin OF para metodoPagoId={} — no se ajusta diferencia QR",
+                    historialElectronicoId, metodoPagoId);
+            return null;
+        }
+        String usuarioId = resolverUsuarioSistema();
+        LocalDate fecha = LocalDate.now();
+        String terceroT = trunc(tercero, 150);
+        BigDecimal abs = diff.abs();
+        if (diff.compareTo(BigDecimal.ZERO) > 0) {
+            if (origenFondosDevolucionId == null) {
+                throw new IllegalArgumentException(
+                        "Debe indicar el origen de fondos de la devolución (caja u otro).");
+            }
+            if (!cuentaExiste(origenFondosDevolucionId)) {
+                throw new IllegalArgumentException(
+                        "Origen de fondos de devolución no existe: " + origenFondosDevolucionId);
+            }
+            // Banco recibió de más → entra al OF del medio electrónico
+            insertarSimple(cuentaQrId, "ENTRADA_MANUAL", abs, abs, fecha, usuarioId, terceroT,
+                    trunc("QR sobrepago · esperado " + montoEsperado + " · recibido " + montoRecibido, 500),
+                    ORIGEN_TIPO_QR_MONTO_DISTINTO, historialElectronicoId, null);
+            // Devolución en efectivo (u otro OF elegido por el cajero)
+            insertarSimple(origenFondosDevolucionId, "SALIDA_EGRESO", abs, abs.negate(), fecha, usuarioId, terceroT,
+                    trunc("Devolución por envío incorrecto QR · " + abs
+                            + " · desde OF #" + origenFondosDevolucionId, 500),
+                    ORIGEN_TIPO_QR_MONTO_DISTINTO, historialElectronicoId, null);
+            log.info("BD QR_MONTO_DISTINTO sobrepago hre={} diff={} ofQr={} ofDevolucion={}",
+                    historialElectronicoId, abs, cuentaQrId, origenFondosDevolucionId);
+            return null;
+        }
+
+        // Faltante
+        if (abonoCxcId != null) {
+            // Abono CxC: esperado ya entró a OF → baja diferencia y reabre saldo en la misma CxC/ticket.
+            insertarSimple(cuentaQrId, "SALIDA_EGRESO", abs, abs.negate(), fecha, usuarioId, terceroT,
+                    trunc("Pago QR incompleto (abono) · faltante " + abs
+                            + " · esperado " + montoEsperado + " · recibido " + montoRecibido, 500),
+                    ORIGEN_TIPO_QR_MONTO_DISTINTO, historialElectronicoId, null);
+            Long cxcId = registrarCxcFaltanteQr(
+                    abs, null, abonoCxcId, historialElectronicoId, terceroT, usuarioId);
+            log.info("BD QR_MONTO_DISTINTO faltante-abono hre={} diff={} cxcId={}",
+                    historialElectronicoId, abs, cxcId);
+            return null;
+        }
+
+        // Venta: reabre ticket vivo; CxC se abre en FE con modal Generar crédito (abono=recibido).
+        com.infinitesoft.puente_tienda.dto.FaltanteReaperturaResult reapertura =
+                faltanteQrCreditoService.reabrirTicketParaCreditoManual(
+                        abs,
+                        montoRecibido,
+                        montoEsperado,
+                        historialReciboId,
+                        historialElectronicoId,
+                        metodoPagoId);
+        log.info("BD QR_MONTO_DISTINTO faltante-venta→ticket reabierto hre={} ticket={}",
+                historialElectronicoId, reapertura != null ? reapertura.getTicketId() : null);
+        return reapertura;
+    }
+
+    /**
+     * Solo abonos CxC: incrementa saldo de la cuenta existente.
+     */
+    private Long registrarCxcFaltanteQr(
+            BigDecimal faltante,
+            Long historialReciboIdIgnored,
+            Long abonoCxcId,
+            Long historialElectronicoId,
+            String tercero,
+            String usuarioId
+    ) {
+        if (faltante == null || faltante.compareTo(BigDecimal.ZERO) <= 0 || abonoCxcId == null) {
+            return null;
+        }
+        @SuppressWarnings("unchecked")
+        List<Object> rows = entityManager.createNativeQuery(
+                        "SELECT cuenta_por_cobrar_id FROM abono_cxc WHERE id = :id")
+                .setParameter("id", abonoCxcId)
+                .getResultList();
+        if (rows.isEmpty() || rows.get(0) == null) {
+            log.warn("abono_cxc #{} no encontrado para faltante QR", abonoCxcId);
+            return null;
+        }
+        Long cxcId = ((Number) rows.get(0)).longValue();
+        entityManager.createNativeQuery(
+                        "UPDATE cuenta_por_cobrar SET "
+                                + "saldo_pendiente = saldo_pendiente + :faltante, "
+                                + "estado = CASE WHEN estado IN ('PAGADA','ANULADA','CASTIGADA') "
+                                + "THEN 'PARCIAL' ELSE estado END, "
+                                + "fecha_cierre = NULL, "
+                                + "observacion = COALESCE(observacion,'') || :obs, "
+                                + "fecha_actualizacion = CURRENT_TIMESTAMP "
+                                + "WHERE id = :id")
+                .setParameter("faltante", faltante)
+                .setParameter("obs", " · Faltante QR HRE#" + historialElectronicoId + " +" + faltante)
+                .setParameter("id", cxcId)
+                .executeUpdate();
+        log.info("CxC #{} saldo += {} por faltante QR hre={}", cxcId, faltante, historialElectronicoId);
+        return cxcId;
+    }
+
+    private Integer findOrigenFondosIdByMetodoPago(Long metodoPagoId) {
+        if (metodoPagoId == null) {
+            return null;
+        }
+        @SuppressWarnings("unchecked")
+        List<Object> rows = entityManager.createNativeQuery(
+                        "SELECT id FROM origen_fondos WHERE metodo_pago_id = :mp "
+                                + "AND parent_origen_fondos_id IS NULL AND COALESCE(activo, TRUE) = TRUE "
+                                + "ORDER BY id LIMIT 1")
+                .setParameter("mp", metodoPagoId)
+                .getResultList();
+        if (rows.isEmpty() || rows.get(0) == null) {
+            @SuppressWarnings("unchecked")
+            List<Object> any = entityManager.createNativeQuery(
+                            "SELECT id FROM origen_fondos WHERE metodo_pago_id = :mp "
+                                    + "AND COALESCE(activo, TRUE) = TRUE ORDER BY id LIMIT 1")
+                    .setParameter("mp", metodoPagoId)
+                    .getResultList();
+            if (any.isEmpty() || any.get(0) == null) {
+                return null;
+            }
+            return ((Number) any.get(0)).intValue();
+        }
+        return ((Number) rows.get(0)).intValue();
     }
 
     private boolean tieneMovimientoPorIdentificar(Long notifId) {

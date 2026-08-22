@@ -1,5 +1,6 @@
 package com.infinitesoft.puente_tienda.exception;
 
+import com.infinitesoft.puente_tienda.dto.MontoDistintoConfirmacionDto;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -17,6 +18,13 @@ import java.util.Map;
 @RestControllerAdvice
 @Slf4j
 public class RestExceptionHandler {
+
+    @ExceptionHandler(MontoDistintoException.class)
+    public ResponseEntity<MontoDistintoConfirmacionDto> handleMontoDistinto(
+            MontoDistintoException ex, HttpServletRequest req) {
+        log.info("{} {} monto distinto: {}", req.getMethod(), req.getRequestURI(), ex.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(ex.getBody());
+    }
 
     @ExceptionHandler({IllegalArgumentException.class, EntityNotFoundException.class})
     public ResponseEntity<Map<String, Object>> handleNotFound(RuntimeException ex, HttpServletRequest req) {

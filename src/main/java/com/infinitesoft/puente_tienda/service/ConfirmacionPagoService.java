@@ -2,6 +2,7 @@ package com.infinitesoft.puente_tienda.service;
 
 import com.infinitesoft.puente_tienda.dto.*;
 import com.infinitesoft.puente_tienda.entities.*;
+import com.infinitesoft.puente_tienda.exception.MontoDistintoException;
 import com.infinitesoft.puente_tienda.parser.EmailPagoParser;
 import com.infinitesoft.puente_tienda.repositories.*;
 import com.infinitesoft.puente_tienda.util.LogMask;
@@ -157,29 +158,105 @@ public class ConfirmacionPagoService {
     }
 
     @Transactional
-    public PendienteConfirmacionDto asignar(Long historialElectronicoId, Long notificacionId) {
+    public PendienteConfirmacionDto asignar(
+            Long historialElectronicoId,
+            Long notificacionId,
+            boolean confirmarMontoDistinto,
+            Integer origenFondosDevolucionId) {
         HistorialReciboElectronico h = historialElectronicoRepo.findById(historialElectronicoId)
                 .orElseThrow(() -> new IllegalArgumentException("historial electrónico no encontrado"));
         NotificacionEmailPago n = notificacionRepo.findById(notificacionId)
                 .orElseThrow(() -> new IllegalArgumentException("notificación no encontrada"));
 
-        // Resolver hermanas AMBIGUA del mismo monto → dejarlas CREADA si quedan sin match
-        BigDecimal monto = h.getMontoEsperado();
-        confirmar(h, n, n.getNombrePagador());
-        historialElectronicoRepo.findByEstadoAndMontoEsperado("AMBIGUA", monto).forEach(other -> {
+        BigDecimal esperado = h.getMontoEsperado() != null
+                ? h.getMontoEsperado().setScale(2, java.math.RoundingMode.HALF_UP)
+                : BigDecimal.ZERO;
+        BigDecimal recibido = n.getMonto() != null
+                ? n.getMonto().setScale(2, java.math.RoundingMode.HALF_UP)
+                : null;
+        if (recibido == null) {
+            throw new IllegalArgumentException("La notificación no tiene monto parseado.");
+        }
+        boolean distinto = esperado.compareTo(recibido) != 0;
+        BigDecimal diferencia = recibido.subtract(esperado);
+        if (distinto && !confirmarMontoDistinto) {
+            boolean sobrepago = diferencia.compareTo(BigDecimal.ZERO) > 0;
+            throw new MontoDistintoException(MontoDistintoConfirmacionDto.builder()
+                    .code("MONTO_DISTINTO")
+                    .historialElectronicoId(h.getId())
+                    .notificacionId(n.getId())
+                    .montoEsperado(esperado)
+                    .montoRecibido(recibido)
+                    .diferencia(diferencia)
+                    .nombrePagador(n.getNombrePagador())
+                    .requiereOrigenDevolucion(sobrepago)
+                    .creaCxcFaltante(!sobrepago)
+                    .mensaje(sobrepago
+                            ? "El email trae más que lo esperado. Elige de qué origen de fondos sale la devolución en efectivo."
+                            : "El email trae menos que lo esperado. Se reabrirá el ticket y podrá abrir el crédito (Generar crédito) con el abono = monto recibido.")
+                    .build());
+        }
+        if (distinto && diferencia.compareTo(BigDecimal.ZERO) > 0 && origenFondosDevolucionId == null) {
+            throw new IllegalArgumentException(
+                    "Para sobrepago debe indicar origenFondosDevolucionId (caja u otro OF).");
+        }
+
+        // Resolver hermanas AMBIGUA del mismo monto esperado → dejarlas CREADA si quedan sin match
+        BigDecimal montoEsperado = h.getMontoEsperado();
+        confirmar(h, n, n.getNombrePagador(), recibido);
+        FaltanteReaperturaResult reapertura = null;
+        if (distinto) {
+            reapertura = movimientoDesdeNotificacionService.registrarAjusteMontoDistintoQr(
+                    h.getMetodoPagoId() != null ? h.getMetodoPagoId() : n.getMetodoPagoId(),
+                    esperado,
+                    recibido,
+                    h.getId(),
+                    n.getNombrePagador(),
+                    origenFondosDevolucionId,
+                    h.getHistorialReciboId(),
+                    h.getAbonoCxcId()
+            );
+        }
+        historialElectronicoRepo.findByEstadoAndMontoEsperado("AMBIGUA", montoEsperado).forEach(other -> {
             if (!other.getId().equals(h.getId())) {
                 other.setEstado("CREADA");
                 historialElectronicoRepo.save(other);
             }
         });
-        return toDto(h, n.getId(), false, null, new HashMap<>());
+        PendienteConfirmacionDto dto = toDto(h, n.getId(), false, null, new HashMap<>());
+        if (reapertura != null) {
+            dto.setAbrirCxcManual(true);
+            dto.setTicketIdReabierto(reapertura.getTicketId());
+            dto.setReciboIdReabierto(reapertura.getReciboId());
+            dto.setTotalTicketReabierto(reapertura.getTotalTicket());
+            dto.setFaltante(reapertura.getFaltante());
+            if (reapertura.getMontoRecibido() != null) {
+                dto.setMontoRecibido(reapertura.getMontoRecibido());
+            }
+            if (reapertura.getMetodoPagoId() != null) {
+                dto.setMetodoPagoId(reapertura.getMetodoPagoId());
+            }
+        }
+        return dto;
     }
 
     private void confirmar(HistorialReciboElectronico h, NotificacionEmailPago n, String nombrePagador) {
+        confirmar(h, n, nombrePagador, n.getMonto());
+    }
+
+    private void confirmar(
+            HistorialReciboElectronico h,
+            NotificacionEmailPago n,
+            String nombrePagador,
+            BigDecimal montoRecibido
+    ) {
         h.setEstado("CONFIRMADA");
         h.setFechaConfirmacion(LocalDateTime.now());
         if (nombrePagador != null) {
             h.setNombrePagador(nombrePagador);
+        }
+        if (montoRecibido != null) {
+            h.setMontoRecibido(montoRecibido);
         }
         historialElectronicoRepo.save(h);
 
@@ -190,10 +267,11 @@ public class ConfirmacionPagoService {
         }
         notificacionRepo.save(n);
         log.info(
-                "BD match CONFIRMADA historialElectronicoId={} notificacionId={} monto={} pagador={}",
+                "BD match CONFIRMADA historialElectronicoId={} notificacionId={} esperado={} recibido={} pagador={}",
                 h.getId(),
                 n.getId(),
                 h.getMontoEsperado(),
+                h.getMontoRecibido(),
                 LogMask.nombre(h.getNombrePagador()));
     }
 
@@ -233,6 +311,7 @@ public class ConfirmacionPagoService {
                     .map(x -> CandidatoAmbiguoDto.builder()
                             .historialElectronicoId(x.getId())
                             .historialReciboId(x.getHistorialReciboId())
+                            .abonoCxcId(x.getAbonoCxcId())
                             .montoEsperado(x.getMontoEsperado())
                             .nombrePagadorSugerido(finalNombre)
                             .build())
@@ -276,8 +355,8 @@ public class ConfirmacionPagoService {
         }
 
         upsertTicketSinNotificacion(h);
-        log.info("BD historial_recibos_electronicos HUERFANA id={} reciboId={} monto={}",
-                h.getId(), h.getHistorialReciboId(), h.getMontoEsperado());
+        log.info("BD historial_recibos_electronicos HUERFANA id={} reciboId={} abonoCxcId={} monto={}",
+                h.getId(), h.getHistorialReciboId(), h.getAbonoCxcId(), h.getMontoEsperado());
         return toDto(h, null, false, null, new HashMap<>());
     }
 
@@ -287,6 +366,13 @@ public class ConfirmacionPagoService {
     }
 
     private void upsertTicketSinNotificacion(HistorialReciboElectronico h) {
+        // Abonos CxC aún no tienen historial_recibo; no insertar en ticket_sin_notificacion
+        // (FK NOT NULL). Quedan HUERFANA en HRE; listado OF/ajustes en sprint posterior.
+        if (h.getHistorialReciboId() == null) {
+            log.info("ya-no-esperar abono CxC id={} abonoCxcId={} — sin ticket_sin_notificacion",
+                    h.getId(), h.getAbonoCxcId());
+            return;
+        }
         if (ticketSinNotificacionRepo.findByHistorialReciboId(h.getHistorialReciboId()).isPresent()) {
             return;
         }
@@ -396,9 +482,11 @@ public class ConfirmacionPagoService {
         return PendienteConfirmacionDto.builder()
                 .id(h.getId())
                 .historialReciboId(h.getHistorialReciboId())
+                .abonoCxcId(h.getAbonoCxcId())
                 .sesionId(h.getSesionId())
                 .metodoPagoId(h.getMetodoPagoId())
                 .montoEsperado(h.getMontoEsperado())
+                .montoRecibido(h.getMontoRecibido())
                 .estado(h.getEstado())
                 .nombrePagador(h.getNombrePagador())
                 .nombreCliente(nombreCliente)
@@ -409,6 +497,36 @@ public class ConfirmacionPagoService {
                 .ambiguo(ambiguo)
                 .candidatos(cands)
                 .build();
+    }
+
+    /**
+     * Emails de pago QR aún sin vincular a un historial electrónico
+     * (candidatos a asociar manualmente, incl. monto distinto).
+     */
+    @Transactional(readOnly = true)
+    public List<NotificacionSinAsignarDto> listarSinAsignar() {
+        return notificacionRepo.findByEstadoVistaOrderByRecibidoEnDesc("PENDIENTE").stream()
+                .filter(n -> n.getHistorialReciboElectronicoId() == null)
+                .filter(n -> n.getMonto() != null && n.getMonto().compareTo(BigDecimal.ZERO) > 0)
+                .filter(n -> {
+                    // Excluir las que ya fueron a ledger por plantilla ingreso/egreso
+                    if (n.getPlantillaNotificacionId() == null) {
+                        return true;
+                    }
+                    return plantillaRepo.findById(n.getPlantillaNotificacionId())
+                            .map(p -> !movimientoDesdeNotificacionService.esPlantillaDeMovimiento(p))
+                            .orElse(true);
+                })
+                .limit(40)
+                .map(n -> NotificacionSinAsignarDto.builder()
+                        .id(n.getId())
+                        .monto(n.getMonto())
+                        .nombrePagador(n.getNombrePagador())
+                        .asunto(n.getAsunto())
+                        .recibidoEn(n.getRecibidoEn())
+                        .metodoPagoId(n.getMetodoPagoId())
+                        .build())
+                .collect(Collectors.toList());
     }
 
     private EmailPagoParser.ParsedPago parseConPlantillas(String cuerpoLimpio, Long metodoId) {

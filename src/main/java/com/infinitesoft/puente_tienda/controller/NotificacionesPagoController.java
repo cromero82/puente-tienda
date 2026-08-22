@@ -2,6 +2,7 @@ package com.infinitesoft.puente_tienda.controller;
 
 import com.infinitesoft.puente_tienda.dto.AsignarConfirmacionRequest;
 import com.infinitesoft.puente_tienda.dto.MarcarConfirmadasRequest;
+import com.infinitesoft.puente_tienda.dto.NotificacionSinAsignarDto;
 import com.infinitesoft.puente_tienda.dto.PendienteConfirmacionDto;
 import com.infinitesoft.puente_tienda.entities.TicketSinNotificacion;
 import com.infinitesoft.puente_tienda.service.ConfirmacionPagoService;
@@ -26,6 +27,12 @@ public class NotificacionesPagoController {
         return service.listarPendientes(sesionId);
     }
 
+    @GetMapping("/api/notificaciones/sin-asignar")
+    public List<NotificacionSinAsignarDto> sinAsignar() {
+        log.debug("GET notificaciones sin-asignar");
+        return service.listarSinAsignar();
+    }
+
     @PutMapping("/api/notificaciones/confirmadas")
     public ResponseEntity<?> marcarConfirmadas(@RequestBody MarcarConfirmadasRequest req) {
         log.info("PUT confirmadas/vista ids={}",
@@ -38,8 +45,10 @@ public class NotificacionesPagoController {
     public PendienteConfirmacionDto asignar(
             @PathVariable Long id,
             @RequestBody AsignarConfirmacionRequest req) {
-        log.info("PUT asignar historialElectronicoId={} notificacionId={}", id, req.getNotificacionId());
-        return service.asignar(id, req.getNotificacionId());
+        boolean confirmarDistinto = Boolean.TRUE.equals(req.getConfirmarMontoDistinto());
+        log.info("PUT asignar historialElectronicoId={} notificacionId={} confirmarMontoDistinto={} ofDevolucion={}",
+                id, req.getNotificacionId(), confirmarDistinto, req.getOrigenFondosDevolucionId());
+        return service.asignar(id, req.getNotificacionId(), confirmarDistinto, req.getOrigenFondosDevolucionId());
     }
 
     @PutMapping("/api/recibos-electronicos/{id}/ya-no-esperar")

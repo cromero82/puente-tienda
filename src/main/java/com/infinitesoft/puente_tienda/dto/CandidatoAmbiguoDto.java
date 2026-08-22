@@ -10,6 +10,7 @@ import java.math.BigDecimal;
 public class CandidatoAmbiguoDto {
     private Long historialElectronicoId;
     private Long historialReciboId;
+    private Long abonoCxcId;
     private BigDecimal montoEsperado;
     private String nombrePagadorSugerido;
 }
