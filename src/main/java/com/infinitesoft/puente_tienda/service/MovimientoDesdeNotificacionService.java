@@ -259,7 +259,9 @@ public class MovimientoDesdeNotificacionService {
      * Tras confirmar match QR con monto distinto al esperado.
      * <ul>
      *   <li>Sobrepago: +diff en OF del medio QR; −diff en {@code origenFondosDevolucionId}
-     *       (caja u otro OF elegido — el efectivo que se le devolvió al cliente).</li>
+     *       (caja u otro OF elegido — el efectivo que se le devolvió al cliente).
+     *       Ambos como {@code AJUSTE_SALDO} (no {@code SALIDA_EGRESO}): el corte excluye
+     *       egresos formales de la columna movimientos; esta devolución no es un egreso documento.</li>
      *   <li>Faltante: −diff en OF del medio QR (no llegó al banco) y deuda CxC
      *       (crear o reabrir saldo) por el faltante.</li>
      * </ul>
@@ -308,14 +310,13 @@ public class MovimientoDesdeNotificacionService {
                 throw new IllegalArgumentException(
                         "Origen de fondos de devolución no existe: " + origenFondosDevolucionId);
             }
-            // Banco recibió de más → entra al OF del medio electrónico
-            insertarSimple(cuentaQrId, "ENTRADA_MANUAL", abs, abs, fecha, usuarioId, terceroT,
-                    trunc("QR sobrepago · esperado " + montoEsperado + " · recibido " + montoRecibido, 500),
+            // Banco recibió de más → el exceso queda en el OF del medio electrónico
+            insertarSimple(cuentaQrId, "AJUSTE_SALDO", abs, abs, fecha, usuarioId, terceroT,
+                    trunc("Sobrepago QR · esperado " + montoEsperado + " · recibido " + montoRecibido, 500),
                     ORIGEN_TIPO_QR_MONTO_DISTINTO, historialElectronicoId, null);
-            // Devolución en efectivo (u otro OF elegido por el cajero)
-            insertarSimple(origenFondosDevolucionId, "SALIDA_EGRESO", abs, abs.negate(), fecha, usuarioId, terceroT,
-                    trunc("Devolución por envío incorrecto QR · " + abs
-                            + " · desde OF #" + origenFondosDevolucionId, 500),
+            // Devolución en efectivo (u otro OF) — AJUSTE_SALDO para que sume en corte.movimientos
+            insertarSimple(origenFondosDevolucionId, "AJUSTE_SALDO", abs, abs.negate(), fecha, usuarioId, terceroT,
+                    trunc("Devolución al cliente por sobrepago QR · " + abs, 500),
                     ORIGEN_TIPO_QR_MONTO_DISTINTO, historialElectronicoId, null);
             log.info("BD QR_MONTO_DISTINTO sobrepago hre={} diff={} ofQr={} ofDevolucion={}",
                     historialElectronicoId, abs, cuentaQrId, origenFondosDevolucionId);
@@ -324,8 +325,8 @@ public class MovimientoDesdeNotificacionService {
 
         // Faltante
         if (abonoCxcId != null) {
-            // Abono CxC: esperado ya entró a OF → baja diferencia y reabre saldo en la misma CxC/ticket.
-            insertarSimple(cuentaQrId, "SALIDA_EGRESO", abs, abs.negate(), fecha, usuarioId, terceroT,
+            // Abono CxC: esperado ya entró a OF → baja diferencia (ajuste, no egreso documento).
+            insertarSimple(cuentaQrId, "AJUSTE_SALDO", abs, abs.negate(), fecha, usuarioId, terceroT,
                     trunc("Pago QR incompleto (abono) · faltante " + abs
                             + " · esperado " + montoEsperado + " · recibido " + montoRecibido, 500),
                     ORIGEN_TIPO_QR_MONTO_DISTINTO, historialElectronicoId, null);
