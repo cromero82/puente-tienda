@@ -126,7 +126,8 @@ public class GestionNotificacionService {
         PlantillaNotificacionPago p = PlantillaNotificacionPago.builder()
                 .nombre(nombre)
                 .cuerpo(requireCuerpo(req.getCuerpo()))
-                .icono(normalizeIcono(req.getIcono()))
+                .icono(normalizeIconoOptional(req.getIcono()))
+                .metodoPagoId(req.getMetodoPagoId())
                 .activo(req.getActivo() == null || req.getActivo())
                 .orden(req.getOrden() != null ? req.getOrden() : siguienteOrden())
                 .naturaleza(normalizeNaturaleza(req.getNaturaleza()))
@@ -135,8 +136,8 @@ public class GestionNotificacionService {
                 .origenTipo(defaultOrigenTipo(req.getOrigenTipo()))
                 .build();
         PlantillaNotificacionPago saved = plantillaRepo.save(p);
-        log.info("BD plantilla_notificacion_pago INSERT id={} nombre={} icono={}",
-                saved.getId(), saved.getNombre(), saved.getIcono());
+        log.info("BD plantilla_notificacion_pago INSERT id={} nombre={} metodoPagoId={} icono={}",
+                saved.getId(), saved.getNombre(), saved.getMetodoPagoId(), saved.getIcono());
         movimientoDesdeNotificacionService.registrarPendientesDePlantilla(saved);
         movimientoDesdeNotificacionService.vincularYContabilizarSinPlantilla(saved);
         return saved;
@@ -152,7 +153,8 @@ public class GestionNotificacionService {
         }
         p.setNombre(nombre);
         p.setCuerpo(requireCuerpo(req.getCuerpo()));
-        p.setIcono(normalizeIcono(req.getIcono()));
+        p.setIcono(normalizeIconoOptional(req.getIcono()));
+        p.setMetodoPagoId(req.getMetodoPagoId());
         if (req.getActivo() != null) {
             p.setActivo(req.getActivo());
         }
@@ -164,8 +166,8 @@ public class GestionNotificacionService {
         p.setOrigenFondosDestinoId(req.getOrigenFondosDestinoId());
         p.setOrigenTipo(defaultOrigenTipo(req.getOrigenTipo()));
         PlantillaNotificacionPago saved = plantillaRepo.save(p);
-        log.info("BD plantilla_notificacion_pago UPDATE id={} nombre={} icono={} cuerpoLen={}",
-                saved.getId(), saved.getNombre(), saved.getIcono(),
+        log.info("BD plantilla_notificacion_pago UPDATE id={} nombre={} metodoPagoId={} icono={} cuerpoLen={}",
+                saved.getId(), saved.getNombre(), saved.getMetodoPagoId(), saved.getIcono(),
                 saved.getCuerpo() != null ? saved.getCuerpo().length() : 0);
         movimientoDesdeNotificacionService.registrarPendientesDePlantilla(saved);
         movimientoDesdeNotificacionService.vincularYContabilizarSinPlantilla(saved);
@@ -212,10 +214,14 @@ public class GestionNotificacionService {
         return cuerpo.trim();
     }
 
-    private static String normalizeIcono(String icono) {
-        String v = icono == null || icono.isBlank() ? IconosPlantilla.defaultIcono() : icono.trim();
+    private static String normalizeIconoOptional(String icono) {
+        if (icono == null || icono.isBlank()) {
+            return null;
+        }
+        String v = icono.trim();
         if (!IconosPlantilla.isAllowed(v)) {
-            throw new IllegalArgumentException("icono no permitido: " + v);
+            // Permitir null / legado no listado: no bloquear si el icono ya viene de metodo_pago
+            return v;
         }
         return v;
     }

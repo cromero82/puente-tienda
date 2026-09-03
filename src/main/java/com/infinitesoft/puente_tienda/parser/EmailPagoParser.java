@@ -77,8 +77,11 @@ public final class EmailPagoParser {
             switch (canon) {
                 case "MONTO":
                     groupNames.put(groupIdx++, canon);
-                    // Incluye apóstrofe CO ($1'200,000.00) y NBSP
-                    regex.append("(?:\\$\\s*)?([\\d.,'\\u00A0\\u2019\\u00B4]+)");
+                    // "$16.000", "$ 16.000", NBSP tras $; miles CO/US. No engulle punto final de frase.
+                    regex.append("(?:[$＄][\\s\\u00A0\\u202F]*)?("
+                            + "\\d{1,3}(?:[.'\\u00A0\\u202F\\u2019\\u00B4,]\\d{3})+(?:[.,]\\d{1,2})?"
+                            + "|\\d+(?:[.,]\\d{1,2})?"
+                            + ")");
                     break;
                 case "REFERENCIA_CUENTA":
                     groupNames.put(groupIdx++, canon);
@@ -387,11 +390,17 @@ public final class EmailPagoParser {
         // Bancos CO a veces usan apóstrofe como miles: $1'200,000.00
         String s = raw.trim()
                 .replace("$", "")
+                .replace("＄", "")
                 .replace("\u00A0", "")
+                .replace("\u202F", "")
                 .replace(" ", "")
                 .replace("'", "")
                 .replace("\u2019", "")
                 .replace("\u00B4", "");
+        // Punto/coma final de frase («$15.000.») no es parte del número
+        while (s.length() > 1 && (s.endsWith(".") || s.endsWith(","))) {
+            s = s.substring(0, s.length() - 1);
+        }
         if (s.isEmpty()) {
             return null;
         }

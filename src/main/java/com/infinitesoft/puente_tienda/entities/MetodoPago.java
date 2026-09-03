@@ -20,6 +20,13 @@ public class MetodoPago {
 
     private String sigla;
 
+    @Column(name = "file", length = 300)
+    private String file;
+
     @Column(name = "plantilla_notificacion_pago", columnDefinition = "TEXT")
     private String plantillaNotificacionPago;
+
+    @Column(name = "permite_notificacion")
+    @Builder.Default
+    private Boolean permiteNotificacion = false;
 }

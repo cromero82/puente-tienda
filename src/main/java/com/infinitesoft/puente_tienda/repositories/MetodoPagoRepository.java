@@ -7,4 +7,6 @@ import java.util.List;
 
 public interface MetodoPagoRepository extends JpaRepository<MetodoPago, Long> {
     List<MetodoPago> findByPlantillaNotificacionPagoIsNotNull();
+
+    List<MetodoPago> findByPermiteNotificacionTrueOrderByIdAsc();
 }

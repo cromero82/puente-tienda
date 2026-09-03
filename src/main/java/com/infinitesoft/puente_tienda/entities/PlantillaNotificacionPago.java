@@ -23,8 +23,12 @@ public class PlantillaNotificacionPago {
     @Column(nullable = false, columnDefinition = "TEXT")
     private String cuerpo;
 
-    @Column(nullable = false, length = 120)
+    /** Legado; preferir metodo_pago.file vía metodoPagoId. */
+    @Column(length = 120)
     private String icono;
+
+    @Column(name = "metodo_pago_id")
+    private Long metodoPagoId;
 
     @Column(nullable = false)
     @Builder.Default

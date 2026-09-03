@@ -40,18 +40,39 @@ public class MovimientoDesdeNotificacionService {
     @PersistenceContext
     private EntityManager entityManager;
 
+    /**
+     * EGRESO (u OF configurados sin INGRESO): escribe ledger movimiento_origen_fondos.
+     * INGRESO + metodoPagoId es confirmación de venta (HRE), no movimiento de este tipo.
+     */
     public boolean esPlantillaDeMovimiento(PlantillaNotificacionPago p) {
         if (p == null) {
             return false;
         }
-        if (p.getNaturaleza() != null && !p.getNaturaleza().isBlank()) {
+        String nat = p.getNaturaleza() != null ? p.getNaturaleza().trim().toUpperCase() : "";
+        if ("INGRESO".equals(nat)) {
+            return false;
+        }
+        if ("EGRESO".equals(nat)) {
             return true;
         }
+        // Legado sin naturaleza: solo movimiento si hay OF
         if (p.getOrigenFondosOrigenId() != null || p.getOrigenFondosDestinoId() != null) {
             return true;
         }
         String nombre = p.getNombre() != null ? p.getNombre().toUpperCase() : "";
-        return nombre.contains("EGRESO") || nombre.contains("INGRESO");
+        return nombre.contains("EGRESO");
+    }
+
+    /**
+     * Confirmación de pago electrónico de venta/abono:
+     * naturaleza INGRESO + método de pago asociado.
+     */
+    public boolean esPlantillaConfirmacionElectronica(PlantillaNotificacionPago p) {
+        if (p == null || p.getMetodoPagoId() == null) {
+            return false;
+        }
+        String nat = p.getNaturaleza() != null ? p.getNaturaleza().trim().toUpperCase() : "";
+        return "INGRESO".equals(nat);
     }
 
     @Transactional

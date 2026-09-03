@@ -174,4 +174,38 @@ class EmailPagoParserTest {
         assertEquals(0, new BigDecimal("1000000.00").compareTo(parsed.getMonto()));
         assertEquals("MF_PUERNOR3", parsed.getNombrePagador());
     }
+
+    @Test
+    void nequiVentaExitosaPorMonto() {
+        String plantilla = "Venta exitosa por {{monto}}";
+        for (String cuerpo : new String[] {
+                "Venta exitosa por $15.000",
+                "Venta exitosa por $15.000.",
+                "Venta exitosa por 15.000",
+                "<p>Venta exitosa por $15.000</p>",
+                "Alertas y Notificaciones\n\nVenta exitosa por $15.000\n"
+        }) {
+            EmailPagoParser.ParsedPago p = EmailPagoParser.parseTemplateOnly(cuerpo, plantilla, 3L);
+            assertNotNull(p, "debe matchear: " + cuerpo);
+            assertEquals(0, new BigDecimal("15000").compareTo(p.getMonto()), cuerpo);
+        }
+    }
+
+    @Test
+    void nequiVentaExitosaMontoConEspacioTrasSimbolo() {
+        String plantilla = "Venta exitosa por {{monto}}";
+        // Fragmento real Nequi / Gmail: espacio (o NBSP) entre $ y el número
+        String[] cuerpos = {
+                "Venta exitosa por $ 16.000",
+                "Venta exitosa por $  16.000",
+                "Venta exitosa por $ 16.000.",
+                "Venta exitosa por $\u00A016.000",
+                "<div>Venta exitosa por $ 16.000</div>"
+        };
+        for (String cuerpo : cuerpos) {
+            EmailPagoParser.ParsedPago p = EmailPagoParser.parseTemplateOnly(cuerpo, plantilla, 3L);
+            assertNotNull(p, "debe matchear espacio tras $: " + cuerpo.replace('\u00A0', '␣'));
+            assertEquals(0, new BigDecimal("16000").compareTo(p.getMonto()), cuerpo);
+        }
+    }
 }

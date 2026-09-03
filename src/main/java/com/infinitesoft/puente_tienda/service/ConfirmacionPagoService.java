@@ -57,13 +57,19 @@ public class ConfirmacionPagoService {
         String cuerpoLimpio = EmailPagoParser.toPlainText(inboundElegido);
         Long metodoId = req.getMetodoPagoId();
         if (metodoId == null) {
-            metodoId = metodoPagoRepo.findByPlantillaNotificacionPagoIsNotNull().stream()
+            metodoId = metodoPagoRepo.findByPermiteNotificacionTrueOrderByIdAsc().stream()
                     .map(MetodoPago::getId)
                     .findFirst()
-                    .orElse(2L);
+                    .orElseGet(() -> metodoPagoRepo.findByPlantillaNotificacionPagoIsNotNull().stream()
+                            .map(MetodoPago::getId)
+                            .findFirst()
+                            .orElse(2L));
         }
 
         EmailPagoParser.ParsedPago parsed = parseConPlantillas(cuerpoLimpio, metodoId);
+        if (parsed != null && parsed.getMetodoPagoId() != null) {
+            metodoId = parsed.getMetodoPagoId();
+        }
         String cuerpoTexto = EmailPagoParser.resolverCuerpoTexto(cuerpoLimpio, parsed);
 
         String refEsperada = establecimientoRepo.findFirstByActivoTrueOrderByIdAsc()
@@ -128,25 +134,59 @@ public class ConfirmacionPagoService {
         PlantillaNotificacionPago plantillaMatch = parsed != null && parsed.getPlantillaId() != null
                 ? plantillaRepo.findById(parsed.getPlantillaId()).orElse(null)
                 : null;
-        boolean plantillaLedger = movimientoDesdeNotificacionService.esPlantillaDeMovimiento(plantillaMatch);
-        if (plantillaLedger) {
-            movimientoDesdeNotificacionService.registrarSiAplica(notif, plantillaMatch);
-        } else if (parsed != null && parsed.getMonto() != null) {
+        if (esConfirmacionElectronicaValida(plantillaMatch, metodoId)) {
             intentarMatchAutomatico(notif, parsed.getMonto(), parsed.getNombrePagador());
+        } else if (movimientoDesdeNotificacionService.esPlantillaDeMovimiento(plantillaMatch)) {
+            movimientoDesdeNotificacionService.registrarSiAplica(notif, plantillaMatch);
+        } else {
+            log.info(
+                    "email-inbound id={} sin auto-confirmación (requiere plantilla INGRESO + metodo permite_notificacion). plantilla={} metodoPagoId={}",
+                    notif.getId(),
+                    plantillaMatch != null ? plantillaMatch.getNombre() : "-",
+                    metodoId);
         }
         return notif;
     }
 
+    /**
+     * Venta/abono electrónico se confirma solo si:
+     * 1) método tiene permite_notificacion
+     * 2) plantilla naturaleza INGRESO
+     * 3) plantilla.metodoPagoId = ese método
+     */
+    private boolean esConfirmacionElectronicaValida(PlantillaNotificacionPago plantilla, Long metodoId) {
+        if (!movimientoDesdeNotificacionService.esPlantillaConfirmacionElectronica(plantilla)) {
+            return false;
+        }
+        if (metodoId == null || !metodoId.equals(plantilla.getMetodoPagoId())) {
+            return false;
+        }
+        return metodoPagoRepo.findById(metodoId)
+                .map(mp -> Boolean.TRUE.equals(mp.getPermiteNotificacion()))
+                .orElse(false);
+    }
+
     private void intentarMatchAutomatico(NotificacionEmailPago notif, BigDecimal monto, String nombrePagador) {
+        if (monto == null) {
+            return;
+        }
         List<HistorialReciboElectronico> candidatos =
                 historialElectronicoRepo.findByEstadoAndMontoEsperado("CREADA", monto);
 
+        if (notif.getMetodoPagoId() != null) {
+            candidatos = candidatos.stream()
+                    .filter(c -> notif.getMetodoPagoId().equals(c.getMetodoPagoId()))
+                    .collect(Collectors.toList());
+        }
+
         if (candidatos.isEmpty()) {
-            log.info("Sin recibo electrónico CREADA para monto {}", monto);
+            log.info("Sin recibo electrónico CREADA para monto {} metodoPagoId={}",
+                    monto, notif.getMetodoPagoId());
             return;
         }
         if (candidatos.size() > 1) {
-            log.info("Ambigüedad: {} CREADA con monto {}", candidatos.size(), monto);
+            log.info("Ambigüedad: {} CREADA con monto {} metodoPagoId={}",
+                    candidatos.size(), monto, notif.getMetodoPagoId());
             candidatos.forEach(c -> {
                 c.setEstado("AMBIGUA");
                 historialElectronicoRepo.save(c);
@@ -532,14 +572,17 @@ public class ConfirmacionPagoService {
     private EmailPagoParser.ParsedPago parseConPlantillas(String cuerpoLimpio, Long metodoId) {
         List<PlantillaNotificacionPago> plantillas = plantillaRepo.findByActivoTrueOrderByOrdenAscIdAsc();
         for (PlantillaNotificacionPago p : plantillas) {
+            Long mpPlantilla = p.getMetodoPagoId() != null ? p.getMetodoPagoId() : metodoId;
             EmailPagoParser.ParsedPago attempt =
-                    EmailPagoParser.parseTemplateOnly(cuerpoLimpio, p.getCuerpo(), metodoId);
+                    EmailPagoParser.parseTemplateOnly(cuerpoLimpio, p.getCuerpo(), mpPlantilla);
             if (attempt != null) {
                 attempt.setPlantillaId(p.getId());
                 attempt.setPlantillaNombre(p.getNombre());
-                attempt.setPlantillaIcono(p.getIcono());
-                log.info("email-inbound match plantilla={} id={} extraído: {}",
-                        p.getNombre(), p.getId(), LogMask.textoPlano(attempt.getFragmento(), 2000));
+                attempt.setMetodoPagoId(mpPlantilla);
+                attempt.setPlantillaIcono(resolverIconoPlantilla(p, mpPlantilla));
+                log.info("email-inbound match plantilla={} id={} metodoPagoId={} extraído: {}",
+                        p.getNombre(), p.getId(), mpPlantilla,
+                        LogMask.textoPlano(attempt.getFragmento(), 2000));
                 return attempt;
             }
         }
@@ -548,6 +591,18 @@ public class ConfirmacionPagoService {
                     plantillas.size(), LogMask.textoPlano(cuerpoLimpio, 800));
         }
         return EmailPagoParser.parse(cuerpoLimpio, null, metodoId);
+    }
+
+    private String resolverIconoPlantilla(PlantillaNotificacionPago p, Long metodoPagoId) {
+        if (metodoPagoId != null) {
+            String file = metodoPagoRepo.findById(metodoPagoId)
+                    .map(MetodoPago::getFile)
+                    .orElse(null);
+            if (file != null && !file.isBlank()) {
+                return file.trim();
+            }
+        }
+        return p.getIcono();
     }
 
     private static String firstNonBlank(String... vals) {
