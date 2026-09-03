@@ -74,6 +74,15 @@ public class NotificacionEmailPago {
     @Column(name = "clasificado_por")
     private java.util.UUID clasificadoPor;
 
+    /**
+     * True si el correo matcheó una plantilla de extracción activa
+     * ({@code plantilla_notificacion_id} no nulo). Spam / Cloudflare sin match → false.
+     */
+    @Transient
+    public boolean isProvienePlantillaExtraccion() {
+        return plantillaNotificacionId != null;
+    }
+
     @PrePersist
     void onCreate() {
         if (recibidoEn == null) {

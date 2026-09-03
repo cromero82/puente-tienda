@@ -28,11 +28,13 @@ public class GestionNotificacionController {
     @GetMapping("/api/notificaciones-email")
     public List<NotificacionEmailPago> listar(
             @RequestParam(required = false) String estadoVista,
-            @RequestParam(required = false) String q) {
-        log.info("GET notificaciones-email estadoVista={} qLen={}",
+            @RequestParam(required = false) String q,
+            @RequestParam(required = false) Boolean provienePlantillaExtraccion) {
+        log.info("GET notificaciones-email estadoVista={} qLen={} provienePlantillaExtraccion={}",
                 estadoVista != null ? estadoVista : "TODAS",
-                q != null ? q.length() : 0);
-        List<NotificacionEmailPago> list = service.listar(estadoVista, q);
+                q != null ? q.length() : 0,
+                provienePlantillaExtraccion);
+        List<NotificacionEmailPago> list = service.listar(estadoVista, q, provienePlantillaExtraccion);
         log.info("GET notificaciones-email resultado count={}", list.size());
         return list;
     }

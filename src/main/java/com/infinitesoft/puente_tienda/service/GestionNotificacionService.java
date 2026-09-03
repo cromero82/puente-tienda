@@ -26,15 +26,23 @@ public class GestionNotificacionService {
     private final MovimientoDesdeNotificacionService movimientoDesdeNotificacionService;
 
     @Transactional(readOnly = true)
-    public List<NotificacionEmailPago> listar(String estadoVista, String q) {
+    public List<NotificacionEmailPago> listar(String estadoVista, String q, Boolean provienePlantillaExtraccion) {
         String query = q == null ? null : q.trim();
+        List<NotificacionEmailPago> list;
         if (estadoVista != null && "POR_IDENTIFICAR".equalsIgnoreCase(estadoVista.trim())) {
-            return notificacionRepo.searchPorIdentificar(query);
+            list = notificacionRepo.searchPorIdentificar(query);
+        } else {
+            String estado = (estadoVista == null || estadoVista.isBlank() || "TODAS".equalsIgnoreCase(estadoVista))
+                    ? null
+                    : estadoVista.trim().toUpperCase();
+            list = notificacionRepo.search(estado, query);
         }
-        String estado = (estadoVista == null || estadoVista.isBlank() || "TODAS".equalsIgnoreCase(estadoVista))
-                ? null
-                : estadoVista.trim().toUpperCase();
-        return notificacionRepo.search(estado, query);
+        if (provienePlantillaExtraccion == null) {
+            return list;
+        }
+        return list.stream()
+                .filter(n -> provienePlantillaExtraccion.equals(n.isProvienePlantillaExtraccion()))
+                .collect(java.util.stream.Collectors.toList());
     }
 
     @Transactional

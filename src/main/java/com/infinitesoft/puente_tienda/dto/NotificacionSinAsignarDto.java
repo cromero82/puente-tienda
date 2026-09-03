@@ -15,4 +15,6 @@ public class NotificacionSinAsignarDto {
     private String asunto;
     private LocalDateTime recibidoEn;
     private Long metodoPagoId;
+    /** Siempre true en esta lista; spam sin plantilla no se incluye. */
+    private Boolean provienePlantillaExtraccion;
 }

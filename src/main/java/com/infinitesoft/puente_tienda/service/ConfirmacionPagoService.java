@@ -362,11 +362,17 @@ public class ConfirmacionPagoService {
         for (HistorialReciboElectronico h : confirmada) {
             Optional<NotificacionEmailPago> nOpt =
                     notificacionRepo.findFirstByHistorialReciboElectronicoIdOrderByRecibidoEnDesc(h.getId());
-            if (nOpt.isPresent() && "MOSTRADA".equals(nOpt.get().getEstadoVista())) {
-                continue; // ya vista en panel
+            // Solo para el countdown del panel: hace falta el email aún no «visto».
+            // Si el correo se eliminó/archivó, la venta ya quedó CONFIRMADA y no debe reaparecer.
+            if (nOpt.isEmpty()) {
+                continue;
             }
-            Long notifId = nOpt.map(NotificacionEmailPago::getId).orElse(null);
-            out.add(toDto(h, notifId, false, null, snapCache));
+            String vista = nOpt.get().getEstadoVista();
+            if (vista != null
+                    && ("MOSTRADA".equalsIgnoreCase(vista) || "ARCHIVADA".equalsIgnoreCase(vista))) {
+                continue;
+            }
+            out.add(toDto(h, nOpt.get().getId(), false, null, snapCache));
         }
         return out;
     }
@@ -488,13 +494,18 @@ public class ConfirmacionPagoService {
             return;
         }
         for (Long id : historialElectronicoIds) {
-            notificacionRepo.findFirstByHistorialReciboElectronicoIdOrderByRecibidoEnDesc(id)
-                    .ifPresent(n -> {
-                        n.setEstadoVista("MOSTRADA");
-                        notificacionRepo.save(n);
-                        log.info("BD notificacion_email_pago MOSTRADA id={} pagador={}",
-                                n.getId(), LogMask.nombre(n.getNombrePagador()));
-                    });
+            Optional<NotificacionEmailPago> nOpt =
+                    notificacionRepo.findFirstByHistorialReciboElectronicoIdOrderByRecibidoEnDesc(id);
+            if (nOpt.isEmpty()) {
+                // Email ya borrado: el HRE CONFIRMADA no debe listarse en pendientes (ver listarPendientes).
+                log.info("PUT confirmadas: sin notificacion_email_pago para historialElectronicoId={} (omitido)", id);
+                continue;
+            }
+            NotificacionEmailPago n = nOpt.get();
+            n.setEstadoVista("MOSTRADA");
+            notificacionRepo.save(n);
+            log.info("BD notificacion_email_pago MOSTRADA id={} pagador={}",
+                    n.getId(), LogMask.nombre(n.getNombrePagador()));
         }
     }
 
@@ -540,23 +551,19 @@ public class ConfirmacionPagoService {
     }
 
     /**
-     * Emails de pago QR aún sin vincular a un historial electrónico
+     * Emails de pago aún sin vincular a un historial electrónico
      * (candidatos a asociar manualmente, incl. monto distinto).
+     * Solo correos que matchearon plantilla de extracción ({@code provienePlantillaExtraccion}).
      */
     @Transactional(readOnly = true)
     public List<NotificacionSinAsignarDto> listarSinAsignar() {
         return notificacionRepo.findByEstadoVistaOrderByRecibidoEnDesc("PENDIENTE").stream()
                 .filter(n -> n.getHistorialReciboElectronicoId() == null)
+                .filter(NotificacionEmailPago::isProvienePlantillaExtraccion)
                 .filter(n -> n.getMonto() != null && n.getMonto().compareTo(BigDecimal.ZERO) > 0)
-                .filter(n -> {
-                    // Excluir las que ya fueron a ledger por plantilla ingreso/egreso
-                    if (n.getPlantillaNotificacionId() == null) {
-                        return true;
-                    }
-                    return plantillaRepo.findById(n.getPlantillaNotificacionId())
-                            .map(p -> !movimientoDesdeNotificacionService.esPlantillaDeMovimiento(p))
-                            .orElse(true);
-                })
+                .filter(n -> plantillaRepo.findById(n.getPlantillaNotificacionId())
+                        .map(p -> !movimientoDesdeNotificacionService.esPlantillaDeMovimiento(p))
+                        .orElse(false))
                 .limit(40)
                 .map(n -> NotificacionSinAsignarDto.builder()
                         .id(n.getId())
@@ -565,6 +572,7 @@ public class ConfirmacionPagoService {
                         .asunto(n.getAsunto())
                         .recibidoEn(n.getRecibidoEn())
                         .metodoPagoId(n.getMetodoPagoId())
+                        .provienePlantillaExtraccion(true)
                         .build())
                 .collect(Collectors.toList());
     }
