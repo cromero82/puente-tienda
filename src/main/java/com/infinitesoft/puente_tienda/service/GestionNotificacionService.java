@@ -1,5 +1,8 @@
 package com.infinitesoft.puente_tienda.service;
 
+import com.infinitesoft.puente_tienda.dto.AlertaEgresoSinVincularDto;
+import com.infinitesoft.puente_tienda.dto.AlertasEgresoSinVincularResponse;
+import com.infinitesoft.puente_tienda.dto.EgresoCandidatoAlertaDto;
 import com.infinitesoft.puente_tienda.dto.PlantillaNotificacionRequest;
 import com.infinitesoft.puente_tienda.entities.NotificacionEmailPago;
 import com.infinitesoft.puente_tienda.entities.PlantillaNotificacionPago;
@@ -7,6 +10,7 @@ import com.infinitesoft.puente_tienda.repositories.NotificacionEmailPagoReposito
 import com.infinitesoft.puente_tienda.repositories.PlantillaNotificacionPagoRepository;
 import com.infinitesoft.puente_tienda.util.IconosPlantilla;
 import com.infinitesoft.puente_tienda.util.LogMask;
+import com.infinitesoft.puente_tienda.util.VinculoOperacion;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.ClassPathResource;
@@ -14,6 +18,10 @@ import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.List;
 
 @Service
@@ -25,8 +33,16 @@ public class GestionNotificacionService {
     private final PlantillaNotificacionPagoRepository plantillaRepo;
     private final MovimientoDesdeNotificacionService movimientoDesdeNotificacionService;
 
+    @PersistenceContext
+    private EntityManager entityManager;
+
     @Transactional(readOnly = true)
-    public List<NotificacionEmailPago> listar(String estadoVista, String q, Boolean provienePlantillaExtraccion) {
+    public List<NotificacionEmailPago> listar(
+            String estadoVista,
+            String q,
+            Boolean provienePlantillaExtraccion,
+            String vinculoOperacion
+    ) {
         String query = q == null ? null : q.trim();
         List<NotificacionEmailPago> list;
         if (estadoVista != null && "POR_IDENTIFICAR".equalsIgnoreCase(estadoVista.trim())) {
@@ -37,12 +53,201 @@ public class GestionNotificacionService {
                     : estadoVista.trim().toUpperCase();
             list = notificacionRepo.search(estado, query);
         }
-        if (provienePlantillaExtraccion == null) {
-            return list;
+        if (provienePlantillaExtraccion != null) {
+            list = list.stream()
+                    .filter(n -> provienePlantillaExtraccion.equals(n.isProvienePlantillaExtraccion()))
+                    .collect(java.util.stream.Collectors.toList());
         }
-        return list.stream()
-                .filter(n -> provienePlantillaExtraccion.equals(n.isProvienePlantillaExtraccion()))
-                .collect(java.util.stream.Collectors.toList());
+        if (vinculoOperacion != null && !vinculoOperacion.isBlank()
+                && !"TODAS".equalsIgnoreCase(vinculoOperacion.trim())) {
+            String vinculo = vinculoOperacion.trim().toUpperCase();
+            list = list.stream()
+                    .filter(n -> vinculo.equalsIgnoreCase(n.getVinculoOperacion()))
+                    .collect(java.util.stream.Collectors.toList());
+        }
+        return list;
+    }
+
+    @Transactional(readOnly = true)
+    public List<NotificacionEmailPago> candidatasEgreso(Long egresoId) {
+        EgresoSnapshot egreso = cargarEgreso(egresoId);
+        LocalDate fecha = egreso.fecha != null ? egreso.fecha : LocalDate.now();
+        return notificacionRepo.findCandidatasEgreso(
+                egreso.valor,
+                fecha.minusDays(7),
+                fecha.plusDays(7));
+    }
+
+    @Transactional
+    public NotificacionEmailPago asociarEgreso(Long notificacionId, Long egresoId) {
+        if (egresoId == null) {
+            throw new IllegalArgumentException("egresoId requerido");
+        }
+        NotificacionEmailPago n = notificacionRepo.findById(notificacionId)
+                .orElseThrow(() -> new IllegalArgumentException("notificación no encontrada"));
+        if (VinculoOperacion.esAsociada(n.getVinculoOperacion())
+                || n.getEgresoId() != null
+                || n.getHistorialReciboElectronicoId() != null) {
+            throw new IllegalArgumentException(
+                    "La notificación #" + notificacionId + " ya está asociada a una operación.");
+        }
+        if (!VinculoOperacion.esPendiente(n.getVinculoOperacion())) {
+            throw new IllegalArgumentException(
+                    "Esta notificación no aplica para asociar a un egreso (vínculo "
+                            + n.getVinculoOperacion() + ").");
+        }
+        if (n.getClasificacion() != null && !n.getClasificacion().isBlank()) {
+            throw new IllegalArgumentException(
+                    "La notificación ya fue legalizada; no se puede asociar a un egreso.");
+        }
+        PlantillaNotificacionPago plantilla = n.getPlantillaNotificacionId() != null
+                ? plantillaRepo.findById(n.getPlantillaNotificacionId()).orElse(null)
+                : null;
+        if (plantilla == null || !movimientoDesdeNotificacionService.esPlantillaDeMovimiento(plantilla)) {
+            throw new IllegalArgumentException(
+                    "Solo notificaciones de plantilla EGRESO se pueden asociar a un egreso.");
+        }
+        EgresoSnapshot egreso = cargarEgreso(egresoId);
+        if (egreso.notificacionId != null && !egreso.notificacionId.equals(notificacionId)) {
+            throw new IllegalArgumentException(
+                    "El egreso #" + egresoId + " ya tiene la notificación #" + egreso.notificacionId + ".");
+        }
+        if (egreso.fromMovimientoId != null && egreso.notificacionId == null) {
+            throw new IllegalArgumentException(
+                    "El egreso #" + egresoId + " ya fue formalizado desde un movimiento; no se asocia otro correo.");
+        }
+
+        notificacionRepo.findFirstByEgresoId(egresoId).ifPresent(otra -> {
+            if (!otra.getId().equals(notificacionId)) {
+                throw new IllegalArgumentException(
+                        "El egreso #" + egresoId + " ya está ligado a la notificación #" + otra.getId() + ".");
+            }
+        });
+
+        movimientoDesdeNotificacionService.anularParPorIdentificarYSellarEgreso(n.getId(), egresoId);
+
+        n.setEgresoId(egresoId);
+        n.setVinculoOperacion(VinculoOperacion.ASOCIADA);
+        if (!"ARCHIVADA".equalsIgnoreCase(n.getEstadoVista())) {
+            n.setEstadoVista("MOSTRADA");
+        }
+        NotificacionEmailPago saved = notificacionRepo.save(n);
+
+        entityManager.createNativeQuery(
+                        "UPDATE egreso SET notificacion_email_pago_id = :nid "
+                                + "WHERE id = :eid AND notificacion_email_pago_id IS NULL")
+                .setParameter("nid", saved.getId())
+                .setParameter("eid", egresoId)
+                .executeUpdate();
+        entityManager.createNativeQuery(
+                        "UPDATE egreso SET descripcion = CASE "
+                                + "WHEN descripcion IS NULL OR BTRIM(descripcion) = '' THEN :tag "
+                                + "WHEN descripcion LIKE :likeTag THEN descripcion "
+                                + "ELSE descripcion || ' · ' || :tag END "
+                                + "WHERE id = :eid")
+                .setParameter("tag", "Notif #" + saved.getId())
+                .setParameter("likeTag", "%Notif #" + saved.getId() + "%")
+                .setParameter("eid", egresoId)
+                .executeUpdate();
+
+        log.info("BD notificacion_email_pago ASOCIADA egreso id={} egresoId={}", saved.getId(), egresoId);
+        return saved;
+    }
+
+    @Transactional(readOnly = true)
+    public AlertasEgresoSinVincularResponse listarAlertasEgresoSinVincular() {
+        List<NotificacionEmailPago> pendientes = notificacionRepo.findPendientesEgresoSinMovimiento();
+        List<AlertaEgresoSinVincularDto> items = new java.util.ArrayList<>();
+        for (NotificacionEmailPago n : pendientes) {
+            PlantillaNotificacionPago plantilla = n.getPlantillaNotificacionId() != null
+                    ? plantillaRepo.findById(n.getPlantillaNotificacionId()).orElse(null)
+                    : null;
+            List<EgresoCandidatoAlertaDto> candidatos =
+                    movimientoDesdeNotificacionService.listarEgresosCandidatos(n, plantilla);
+            if (candidatos.isEmpty()) {
+                continue;
+            }
+            items.add(AlertaEgresoSinVincularDto.builder()
+                    .notificacion(n)
+                    .origenFondosOrigenId(plantilla != null ? plantilla.getOrigenFondosOrigenId() : null)
+                    .origenFondosDestinoId(plantilla != null ? plantilla.getOrigenFondosDestinoId() : null)
+                    .candidatos(candidatos)
+                    .build());
+        }
+        return AlertasEgresoSinVincularResponse.builder()
+                .count(items.size())
+                .items(items)
+                .build();
+    }
+
+    /**
+     * El usuario confirma que el correo no corresponde a un egreso ya registrado:
+     * se crea entonces el traslado QR → Sin Clasificar.
+     */
+    @Transactional
+    public NotificacionEmailPago enviarABolsa(Long notificacionId) {
+        NotificacionEmailPago n = notificacionRepo.findById(notificacionId)
+                .orElseThrow(() -> new IllegalArgumentException("notificación no encontrada"));
+        if (VinculoOperacion.esAsociada(n.getVinculoOperacion()) || n.getEgresoId() != null) {
+            throw new IllegalArgumentException(
+                    "La notificación #" + notificacionId + " ya está asociada a un egreso.");
+        }
+        if (!VinculoOperacion.esPendiente(n.getVinculoOperacion())) {
+            throw new IllegalArgumentException(
+                    "Esta notificación no aplica para enviar a Sin Clasificar (vínculo "
+                            + n.getVinculoOperacion() + ").");
+        }
+        if (n.getClasificacion() != null && !n.getClasificacion().isBlank()) {
+            throw new IllegalArgumentException(
+                    "La notificación ya fue legalizada.");
+        }
+        PlantillaNotificacionPago plantilla = n.getPlantillaNotificacionId() != null
+                ? plantillaRepo.findById(n.getPlantillaNotificacionId()).orElse(null)
+                : null;
+        if (plantilla == null || !movimientoDesdeNotificacionService.esPlantillaDeMovimiento(plantilla)) {
+            throw new IllegalArgumentException(
+                    "Solo notificaciones de plantilla EGRESO se envían a Sin Clasificar.");
+        }
+        boolean creado = movimientoDesdeNotificacionService.registrarSiAplica(n, plantilla, true);
+        if (!"ARCHIVADA".equalsIgnoreCase(n.getEstadoVista())) {
+            n.setEstadoVista("MOSTRADA");
+        }
+        NotificacionEmailPago saved = notificacionRepo.save(n);
+        log.info("BD notificacion_email_pago enviar-a-bolsa id={} movimientoCreado={}",
+                saved.getId(), creado);
+        return saved;
+    }
+
+    private EgresoSnapshot cargarEgreso(Long egresoId) {
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = entityManager.createNativeQuery(
+                        "SELECT id, valor, fecha, notificacion_email_pago_id, from_movimiento_origen_fondos_id "
+                                + "FROM egreso WHERE id = :id")
+                .setParameter("id", egresoId)
+                .getResultList();
+        if (rows == null || rows.isEmpty()) {
+            throw new IllegalArgumentException("Egreso no encontrado: " + egresoId);
+        }
+        Object[] row = rows.get(0);
+        EgresoSnapshot s = new EgresoSnapshot();
+        s.id = ((Number) row[0]).longValue();
+        s.valor = row[1] instanceof BigDecimal ? (BigDecimal) row[1] : new BigDecimal(row[1].toString());
+        if (row[2] instanceof java.sql.Date) {
+            s.fecha = ((java.sql.Date) row[2]).toLocalDate();
+        } else if (row[2] instanceof LocalDate) {
+            s.fecha = (LocalDate) row[2];
+        }
+        s.notificacionId = row[3] != null ? ((Number) row[3]).longValue() : null;
+        s.fromMovimientoId = row[4] != null ? ((Number) row[4]).longValue() : null;
+        return s;
+    }
+
+    private static final class EgresoSnapshot {
+        Long id;
+        BigDecimal valor;
+        LocalDate fecha;
+        Long notificacionId;
+        Long fromMovimientoId;
     }
 
     @Transactional

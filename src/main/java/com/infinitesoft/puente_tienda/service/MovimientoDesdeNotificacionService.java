@@ -4,6 +4,7 @@ import com.infinitesoft.puente_tienda.entities.NotificacionEmailPago;
 import com.infinitesoft.puente_tienda.entities.PlantillaNotificacionPago;
 import com.infinitesoft.puente_tienda.parser.EmailPagoParser;
 import com.infinitesoft.puente_tienda.repositories.NotificacionEmailPagoRepository;
+import com.infinitesoft.puente_tienda.util.VinculoOperacion;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.hibernate.query.NativeQuery;
@@ -13,11 +14,17 @@ import org.springframework.transaction.annotation.Transactional;
 
 import javax.persistence.EntityManager;
 import javax.persistence.PersistenceContext;
+import javax.persistence.Query;
 import java.math.BigDecimal;
 import java.sql.Date;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+
+import com.infinitesoft.puente_tienda.dto.EgresoCandidatoAlertaDto;
 
 /**
  * Tras match de plantilla con OF configurados, escribe el ledger
@@ -31,6 +38,9 @@ public class MovimientoDesdeNotificacionService {
     static final String ORIGEN_TIPO_DEFAULT = "MOVIMIENTO BANCO POR IDENTIFICAR";
     /** Segundo movimiento: sale de «Para ordenar» (u otra bolsa) hacia el bolsillo destino. */
     static final String ORIGEN_TIPO_LEGALIZACION = "LEGALIZACION_NOTIFICACION";
+    /** Legado: ya no se inserta; se conserva la constante por si hay filas históricas. */
+    static final String ORIGEN_TIPO_FUSION_EGRESO = "FUSION_EGRESO_NOTIFICACION";
+    static final String ORIGEN_TIPO_EGRESO = "EGRESO";
     /** Ajuste al confirmar QR con monto email ≠ esperado (neto = esperado ya contabilizado). */
     static final String ORIGEN_TIPO_QR_MONTO_DISTINTO = "QR_MONTO_DISTINTO";
 
@@ -118,6 +128,9 @@ public class MovimientoDesdeNotificacionService {
             n.setPlantillaNombre(plantilla.getNombre());
             n.setPlantillaIcono(plantilla.getIcono());
             n.setMonto(parsed.getMonto());
+            if (!VinculoOperacion.esAsociada(n.getVinculoOperacion())) {
+                n.setVinculoOperacion(VinculoOperacion.inicial(plantilla));
+            }
             if (parsed.getNombrePagador() != null && !parsed.getNombrePagador().isBlank()) {
                 n.setNombrePagador(parsed.getNombrePagador());
             }
@@ -153,6 +166,19 @@ public class MovimientoDesdeNotificacionService {
      */
     @Transactional
     public boolean registrarSiAplica(NotificacionEmailPago notif, PlantillaNotificacionPago plantilla) {
+        return registrarSiAplica(notif, plantilla, false);
+    }
+
+    /**
+     * @param forzarAunqueHayaCandidato true = crear el traslado aunque exista un egreso
+     *        sospechoso (acción «enviar a Sin clasificar»).
+     */
+    @Transactional
+    public boolean registrarSiAplica(
+            NotificacionEmailPago notif,
+            PlantillaNotificacionPago plantilla,
+            boolean forzarAunqueHayaCandidato
+    ) {
         if (notif == null || notif.getId() == null || plantilla == null) {
             return false;
         }
@@ -174,6 +200,14 @@ public class MovimientoDesdeNotificacionService {
         String origenTipo = blankToDefault(plantilla.getOrigenTipo(), ORIGEN_TIPO_DEFAULT);
         if (yaExiste(origenTipo, notif.getId())) {
             log.info("notif {} ya tiene movimiento origenTipo={} — skip", notif.getId(), origenTipo);
+            return false;
+        }
+
+        if (!forzarAunqueHayaCandidato
+                && esPlantillaDeMovimiento(plantilla)
+                && !listarEgresosCandidatos(notif, plantilla).isEmpty()) {
+            log.info("notif {} EGRESO con egreso candidato sin vincular — skip traslado (bandeja)",
+                    notif.getId());
             return false;
         }
 
@@ -204,6 +238,197 @@ public class MovimientoDesdeNotificacionService {
                     observacion, origenTipo, notif.getId(), null);
         }
         return true;
+    }
+
+    /**
+     * El egreso ya restó el dinero del origen. Si el correo tardío había creado un
+     * par «por identificar», se borra (no se compensan con FUSION_*) y se recalcan
+     * los saldos de los OF afectados. Si no hay par, solo se sella la observación.
+     *
+     * @return true si se eliminó al menos una fila
+     */
+    @Transactional
+    public boolean anularParPorIdentificarYSellarEgreso(Long notifId, Long egresoId) {
+        if (notifId == null || egresoId == null) {
+            return false;
+        }
+        if (yaExiste(ORIGEN_TIPO_LEGALIZACION, notifId)) {
+            throw new IllegalArgumentException(
+                    "La notificación #" + notifId + " ya fue legalizada; no se puede asociar a un egreso.");
+        }
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = entityManager.createNativeQuery(
+                        "SELECT id, origen_fondos_id "
+                                + "FROM movimiento_origen_fondos "
+                                + "WHERE id_referencia = :idRef AND origen_tipo = :tipo "
+                                + "ORDER BY id")
+                .setParameter("idRef", notifId)
+                .setParameter("tipo", ORIGEN_TIPO_DEFAULT)
+                .getResultList();
+        if (rows == null || rows.isEmpty()) {
+            log.info("notif {} sin movimiento POR IDENTIFICAR — solo se liga al egreso #{}", notifId, egresoId);
+            sellarObservacionSalidaEgreso(egresoId, notifId);
+            return false;
+        }
+
+        List<Long> ids = new ArrayList<>();
+        Set<Integer> ofIds = new LinkedHashSet<>();
+        for (Object[] row : rows) {
+            if (row[0] != null) {
+                ids.add(((Number) row[0]).longValue());
+            }
+            if (row[1] != null) {
+                ofIds.add(((Number) row[1]).intValue());
+            }
+        }
+        if (algunoEnCorteCerrado(ids)) {
+            throw new IllegalArgumentException(
+                    "El movimiento de la notificación #" + notifId
+                            + " ya está incluido en un corte cerrado; no se puede anular el paso por Sin Clasificar.");
+        }
+
+        int borrados = entityManager.createNativeQuery(
+                        "DELETE FROM movimiento_origen_fondos "
+                                + "WHERE id_referencia = :idRef AND origen_tipo = :tipo")
+                .setParameter("idRef", notifId)
+                .setParameter("tipo", ORIGEN_TIPO_DEFAULT)
+                .executeUpdate();
+        for (Integer ofId : ofIds) {
+            recalcularSaldosOf(ofId);
+        }
+        sellarObservacionSalidaEgreso(egresoId, notifId);
+        log.info("BD anula POR IDENTIFICAR notif={} egreso={} filas={}", notifId, egresoId, borrados);
+        return borrados > 0;
+    }
+
+    public List<EgresoCandidatoAlertaDto> listarEgresosCandidatos(
+            NotificacionEmailPago notif,
+            PlantillaNotificacionPago plantilla
+    ) {
+        if (notif == null || notif.getMonto() == null || notif.getMonto().compareTo(BigDecimal.ZERO) <= 0) {
+            return List.of();
+        }
+        LocalDate fecha = notif.getRecibidoEn() != null
+                ? notif.getRecibidoEn().toLocalDate()
+                : LocalDate.now();
+        Integer origenOf = plantilla != null ? plantilla.getOrigenFondosOrigenId() : null;
+        String sql = "SELECT e.id, e.valor, e.fecha, e.descripcion, e.origen_fondos_id, "
+                + "pr.nombre AS proveedor_nombre, pe.nombre AS persona_nombre "
+                + "FROM egreso e "
+                + "LEFT JOIN proveedor pr ON pr.id = e.proveedor_id "
+                + "LEFT JOIN persona pe ON pe.id = e.persona_id "
+                + "WHERE e.notificacion_email_pago_id IS NULL "
+                + "AND e.from_movimiento_origen_fondos_id IS NULL "
+                + "AND e.valor = :monto "
+                + "AND e.fecha BETWEEN :desde AND :hasta ";
+        if (origenOf != null) {
+            sql += "AND (e.origen_fondos_id = :origenOf "
+                    + "     OR EXISTS (SELECT 1 FROM egreso_origen_fondos eof "
+                    + "                WHERE eof.egreso_id = e.id "
+                    + "                AND eof.origen_fondos_id = :origenOf)) ";
+        }
+        sql += "ORDER BY e.id DESC LIMIT 10";
+        Query q = entityManager.createNativeQuery(sql)
+                .setParameter("monto", notif.getMonto())
+                .setParameter("desde", Date.valueOf(fecha.minusDays(7)))
+                .setParameter("hasta", Date.valueOf(fecha.plusDays(7)));
+        if (origenOf != null) {
+            q.setParameter("origenOf", origenOf);
+        }
+        @SuppressWarnings("unchecked")
+        List<Object[]> rows = q.getResultList();
+        List<EgresoCandidatoAlertaDto> out = new ArrayList<>();
+        for (Object[] row : rows) {
+            if (row == null || row[0] == null) {
+                continue;
+            }
+            LocalDate f = null;
+            if (row[2] instanceof java.sql.Date) {
+                f = ((java.sql.Date) row[2]).toLocalDate();
+            } else if (row[2] instanceof LocalDate) {
+                f = (LocalDate) row[2];
+            }
+            out.add(EgresoCandidatoAlertaDto.builder()
+                    .id(((Number) row[0]).longValue())
+                    .valor(toBigDecimal(row[1]))
+                    .fecha(f)
+                    .descripcion(row[3] != null ? row[3].toString() : null)
+                    .origenFondosId(row[4] != null ? ((Number) row[4]).intValue() : null)
+                    .proveedorNombre(row[5] != null ? row[5].toString() : null)
+                    .personaNombre(row[6] != null ? row[6].toString() : null)
+                    .build());
+        }
+        return out;
+    }
+
+    private boolean algunoEnCorteCerrado(List<Long> movimientoIds) {
+        if (movimientoIds == null || movimientoIds.isEmpty()) {
+            return false;
+        }
+        long minId = movimientoIds.stream().min(Long::compareTo).orElse(0L);
+        Number n = (Number) entityManager.createNativeQuery(
+                        "SELECT COUNT(*) FROM corte_venta cv "
+                                + "WHERE LOWER(COALESCE(cv.estado, '')) <> 'eliminado' "
+                                + "AND cv.ultimo_movimiento_origen_fondos_id IS NOT NULL "
+                                + "AND cv.ultimo_movimiento_origen_fondos_id >= :minId")
+                .setParameter("minId", minId)
+                .getSingleResult();
+        return n != null && n.longValue() > 0;
+    }
+
+    private void recalcularSaldosOf(Integer origenFondosId) {
+        if (origenFondosId == null) {
+            return;
+        }
+        @SuppressWarnings("unchecked")
+        List<Object[]> filas = entityManager.createNativeQuery(
+                        "SELECT id, impacto FROM movimiento_origen_fondos "
+                                + "WHERE origen_fondos_id = :of ORDER BY id")
+                .setParameter("of", origenFondosId)
+                .getResultList();
+        BigDecimal running = BigDecimal.ZERO;
+        for (Object[] row : filas) {
+            Long id = ((Number) row[0]).longValue();
+            BigDecimal impacto = toBigDecimal(row[1]);
+            if (impacto == null) {
+                impacto = BigDecimal.ZERO;
+            }
+            BigDecimal antes = running;
+            running = running.add(impacto);
+            entityManager.createNativeQuery(
+                            "UPDATE movimiento_origen_fondos "
+                                    + "SET saldo_antes = :antes, saldo_despues = :despues WHERE id = :id")
+                    .setParameter("antes", antes)
+                    .setParameter("despues", running)
+                    .setParameter("id", id)
+                    .executeUpdate();
+        }
+    }
+
+    private void sellarObservacionSalidaEgreso(Long egresoId, Long notifId) {
+        String tag = "Notif #" + notifId;
+        entityManager.createNativeQuery(
+                        "UPDATE movimiento_origen_fondos SET observacion = CASE "
+                                + "WHEN observacion IS NULL OR BTRIM(observacion) = '' THEN :tag "
+                                + "WHEN observacion LIKE :likeTag THEN observacion "
+                                + "ELSE observacion || ' · ' || :tag END "
+                                + "WHERE origen_tipo = :tipo AND id_referencia = :eid "
+                                + "AND tipo_movimiento = 'SALIDA_EGRESO'")
+                .setParameter("tag", tag)
+                .setParameter("likeTag", "%" + tag + "%")
+                .setParameter("tipo", ORIGEN_TIPO_EGRESO)
+                .setParameter("eid", egresoId)
+                .executeUpdate();
+    }
+
+    private static BigDecimal toBigDecimal(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        if (raw instanceof BigDecimal) {
+            return (BigDecimal) raw;
+        }
+        return new BigDecimal(raw.toString());
     }
 
     /**

@@ -1,5 +1,7 @@
 package com.infinitesoft.puente_tienda.controller;
 
+import com.infinitesoft.puente_tienda.dto.AlertasEgresoSinVincularResponse;
+import com.infinitesoft.puente_tienda.dto.AsociarEgresoRequest;
 import com.infinitesoft.puente_tienda.dto.PlantillaNotificacionRequest;
 import com.infinitesoft.puente_tienda.entities.NotificacionEmailPago;
 import com.infinitesoft.puente_tienda.entities.PlantillaNotificacionPago;
@@ -29,14 +31,45 @@ public class GestionNotificacionController {
     public List<NotificacionEmailPago> listar(
             @RequestParam(required = false) String estadoVista,
             @RequestParam(required = false) String q,
-            @RequestParam(required = false) Boolean provienePlantillaExtraccion) {
-        log.info("GET notificaciones-email estadoVista={} qLen={} provienePlantillaExtraccion={}",
+            @RequestParam(required = false) Boolean provienePlantillaExtraccion,
+            @RequestParam(required = false) String vinculoOperacion) {
+        log.info("GET notificaciones-email estadoVista={} vinculo={} qLen={} provienePlantillaExtraccion={}",
                 estadoVista != null ? estadoVista : "TODAS",
+                vinculoOperacion != null ? vinculoOperacion : "TODAS",
                 q != null ? q.length() : 0,
                 provienePlantillaExtraccion);
-        List<NotificacionEmailPago> list = service.listar(estadoVista, q, provienePlantillaExtraccion);
+        List<NotificacionEmailPago> list = service.listar(
+                estadoVista, q, provienePlantillaExtraccion, vinculoOperacion);
         log.info("GET notificaciones-email resultado count={}", list.size());
         return list;
+    }
+
+    @GetMapping("/api/notificaciones-email/candidatas-egreso")
+    public List<NotificacionEmailPago> candidatasEgreso(@RequestParam Long egresoId) {
+        log.info("GET candidatas-egreso egresoId={}", egresoId);
+        return service.candidatasEgreso(egresoId);
+    }
+
+    @GetMapping("/api/notificaciones-email/alertas-egreso-sin-vincular")
+    public AlertasEgresoSinVincularResponse alertasEgresoSinVincular() {
+        AlertasEgresoSinVincularResponse r = service.listarAlertasEgresoSinVincular();
+        log.info("GET alertas-egreso-sin-vincular count={}", r.getCount());
+        return r;
+    }
+
+    @PutMapping("/api/notificaciones-email/{id}/asociar-egreso")
+    public NotificacionEmailPago asociarEgreso(
+            @PathVariable Long id,
+            @RequestBody AsociarEgresoRequest req) {
+        Long egresoId = req != null ? req.getEgresoId() : null;
+        log.info("PUT asociar-egreso notificacionId={} egresoId={}", id, egresoId);
+        return service.asociarEgreso(id, egresoId);
+    }
+
+    @PostMapping("/api/notificaciones-email/{id}/enviar-a-bolsa")
+    public NotificacionEmailPago enviarABolsa(@PathVariable Long id) {
+        log.info("POST enviar-a-bolsa notificacionId={}", id);
+        return service.enviarABolsa(id);
     }
 
     @PutMapping("/api/notificaciones-email/{id}/archivar")

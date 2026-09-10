@@ -45,12 +45,24 @@ public class NotificacionEmailPago {
     @Column(name = "metodo_pago_id")
     private Long metodoPagoId;
 
+    /** Ciclo de vista en UI: PENDIENTE | MOSTRADA | ARCHIVADA. */
     @Column(name = "estado_vista", nullable = false, length = 20)
     @Builder.Default
     private String estadoVista = "PENDIENTE";
 
+    /**
+     * Vínculo con operación POS: NO_APLICA | PENDIENTE | ASOCIADA.
+     * Distinto de {@link #estadoVista}.
+     */
+    @Column(name = "vinculo_operacion", nullable = false, length = 20)
+    @Builder.Default
+    private String vinculoOperacion = "PENDIENTE";
+
     @Column(name = "historial_recibo_electronico_id")
     private Long historialReciboElectronicoId;
+
+    @Column(name = "egreso_id")
+    private Long egresoId;
 
     @Column(name = "plantilla_notificacion_id")
     private Long plantillaNotificacionId;
@@ -90,6 +102,9 @@ public class NotificacionEmailPago {
         }
         if (estadoVista == null) {
             estadoVista = "PENDIENTE";
+        }
+        if (vinculoOperacion == null) {
+            vinculoOperacion = "PENDIENTE";
         }
     }
 }

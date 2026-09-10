@@ -6,6 +6,7 @@ import com.infinitesoft.puente_tienda.exception.MontoDistintoException;
 import com.infinitesoft.puente_tienda.parser.EmailPagoParser;
 import com.infinitesoft.puente_tienda.repositories.*;
 import com.infinitesoft.puente_tienda.util.LogMask;
+import com.infinitesoft.puente_tienda.util.VinculoOperacion;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -93,6 +94,7 @@ public class ConfirmacionPagoService {
                 .referenciaCuenta(parsed != null ? parsed.getReferenciaCuenta() : null)
                 .metodoPagoId(metodoId)
                 .estadoVista("PENDIENTE")
+                .vinculoOperacion(VinculoOperacion.NO_APLICA)
                 .plantillaNotificacionId(parsed != null ? parsed.getPlantillaId() : null)
                 .plantillaNombre(parsed != null ? parsed.getPlantillaNombre() : null)
                 .plantillaIcono(parsed != null ? parsed.getPlantillaIcono() : null)
@@ -134,6 +136,8 @@ public class ConfirmacionPagoService {
         PlantillaNotificacionPago plantillaMatch = parsed != null && parsed.getPlantillaId() != null
                 ? plantillaRepo.findById(parsed.getPlantillaId()).orElse(null)
                 : null;
+        notif.setVinculoOperacion(VinculoOperacion.inicial(plantillaMatch));
+        notif = notificacionRepo.save(notif);
         if (esConfirmacionElectronicaValida(plantillaMatch, metodoId)) {
             intentarMatchAutomatico(notif, parsed.getMonto(), parsed.getNombrePagador());
         } else if (movimientoDesdeNotificacionService.esPlantillaDeMovimiento(plantillaMatch)) {
@@ -302,6 +306,7 @@ public class ConfirmacionPagoService {
 
         // estado_vista sigue PENDIENTE hasta que el FE termine el countdown → MOSTRADA
         n.setHistorialReciboElectronicoId(h.getId());
+        n.setVinculoOperacion(VinculoOperacion.ASOCIADA);
         if (nombrePagador != null) {
             n.setNombrePagador(nombrePagador);
         }
