@@ -2,13 +2,15 @@
  * Cloudflare Email Worker: Email Routing → POST /api/email-inbound (POS).
  * Regla: pagos@mayaksoluciones.com → este Worker.
  *
- * Fan-out: entrega a DEV (cotiza) y, si está configurado, a SANDBOX (pos-sandbox).
+ * Fan-out:
+ *  - correos a *tienda-infinito* → solo https://tienda-infinito.mayaksoluciones.com
+ *  - el resto (pagos@, pruebas) → DEV (cotiza) y SANDBOX (pos-sandbox).
  * Si al menos un destino responde OK, el correo se acepta.
  */
 export default {
   async email(message, env, ctx) {
     const storeKey = env.STORE_KEY;
-    const urls = collectInboundUrls(env);
+    const urls = collectInboundUrls(env, message.to);
     if (!storeKey || urls.length === 0) {
       message.setReject('Worker mal configurado (INBOUND_URL / STORE_KEY)');
       return;
@@ -84,11 +86,15 @@ export default {
   }
 };
 
-/** URLs únicas: INBOUND_URL (+ INBOUND_URL_SANDBOX si existe). */
-function collectInboundUrls(env) {
+/** URLs únicas según destinatario. */
+function collectInboundUrls(env, messageTo) {
   const seen = new Set();
   const out = [];
-  for (const key of ['INBOUND_URL', 'INBOUND_URL_SANDBOX']) {
+  const to = String(messageTo || '').toLowerCase();
+  const keys = to.includes('tienda-infinito')
+    ? ['INBOUND_URL_TIENDA']
+    : ['INBOUND_URL', 'INBOUND_URL_SANDBOX'];
+  for (const key of keys) {
     const u = String(env[key] || '').trim();
     if (!u || seen.has(u)) continue;
     seen.add(u);

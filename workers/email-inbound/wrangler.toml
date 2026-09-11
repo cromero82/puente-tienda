@@ -9,3 +9,5 @@ account_id = "e5767fad6314cdefea8600977bc6cb11"
 INBOUND_URL = "https://cotiza.mayaksoluciones.com/api/email-inbound"
 # Sandbox (pos-sandbox → Caddy :8180 → puente :8195)
 INBOUND_URL_SANDBOX = "https://pos-sandbox.mayaksoluciones.com/api/email-inbound"
+# Tienda standalone (túnel en esa máquina → Caddy :8080 → puente :8095)
+INBOUND_URL_TIENDA = "https://tienda-infinito.mayaksoluciones.com/api/email-inbound"
