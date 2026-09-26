@@ -4,7 +4,7 @@
  *
  * Fan-out:
  *  - correos a *tienda-infinito* → solo https://tienda-infinito.mayaksoluciones.com
- *  - el resto (pagos@, pruebas) → DEV (cotiza) y SANDBOX (pos-sandbox).
+ *  - el resto (pagos@, pruebas) → Tienda Infinito + DEV (cotiza) + SANDBOX.
  * Si al menos un destino responde OK, el correo se acepta.
  */
 export default {
@@ -91,9 +91,10 @@ function collectInboundUrls(env, messageTo) {
   const seen = new Set();
   const out = [];
   const to = String(messageTo || '').toLowerCase();
+  // pagos@ (bancos) también a Tienda Infinito: si no, solo llegan a laptop/sandbox.
   const keys = to.includes('tienda-infinito')
     ? ['INBOUND_URL_TIENDA']
-    : ['INBOUND_URL', 'INBOUND_URL_SANDBOX'];
+    : ['INBOUND_URL_TIENDA', 'INBOUND_URL', 'INBOUND_URL_SANDBOX'];
   for (const key of keys) {
     const u = String(env[key] || '').trim();
     if (!u || seen.has(u)) continue;
